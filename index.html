@@ -613,51 +613,32 @@
             useEffect(() => { const t = setInterval(() => setCountdown(p => (p>0?p-1:60)), 1000); return () => clearInterval(t); }, []);
 
             const batchWrite = async (collectionName, items) => {
-                if (items.length === 0) return;
+                if (!items || items.length === 0) return;
                 const delay = (ms) => new Promise(res => setTimeout(res, ms));
+                const CHUNK_SIZE = 50;
 
-                if (collectionName === 'segments') {
-                    for (let i = 0; i < items.length; i++) {
-                        const item = items[i];
+                // 修正地圖塊與其他集合的一致性分批寫入邏輯
+                for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                    const chunk = items.slice(i, i + CHUNK_SIZE);
+                    const batch = writeBatch(db);
+                    chunk.forEach(item => {
                         const ref = doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id);
-                        let success = false;
-                        let retries = 5;
-                        while (!success && retries > 0) {
-                            try {
-                                await setDoc(ref, item);
-                                success = true;
-                                await delay(800);
-                            } catch (e) {
-                                if (e.code === 'resource-exhausted') {
-                                    await delay(15000);
-                                    retries--;
-                                } else throw e;
-                            }
-                        }
-                    }
-                } else {
-                    const CHUNK_SIZE = 50;
-                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-                        const chunk = items.slice(i, i + CHUNK_SIZE);
-                        const batch = writeBatch(db);
-                        chunk.forEach(item => {
-                            const ref = doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id);
-                            batch.set(ref, item);
-                        });
-                        
-                        let success = false;
-                        let retries = 3;
-                        while (!success && retries > 0) {
-                            try {
-                                await batch.commit();
-                                success = true;
-                                await delay(1000);
-                            } catch (e) {
-                                if (e.code === 'resource-exhausted') {
-                                    await delay(10000);
-                                    retries--;
-                                } else throw e;
-                            }
+                        batch.set(ref, item);
+                    });
+                    
+                    let success = false;
+                    let retries = 3;
+                    while (!success && retries > 0) {
+                        try {
+                            await batch.commit();
+                            success = true;
+                            // 導入期間不需要過長的延遲，僅確保伺服器處理隊列不阻塞
+                            await delay(200); 
+                        } catch (e) {
+                            if (e.code === 'resource-exhausted') {
+                                await delay(10000);
+                                retries--;
+                            } else throw e;
                         }
                     }
                 }
@@ -920,6 +901,9 @@
                  const f = e.target.files?.[0]; if(!f) return; const r = new FileReader();
                  r.onload = async (ev) => {
                      try {
+                        setIsImporting(true); 
+                        addNotification("備份同步中", "正在寫入雲端數據，請勿關閉視窗...");
+                        
                         let json = JSON.parse(ev.target.result); 
                         const root = json.data || json; 
                         
@@ -930,22 +914,28 @@
                         const segArray = root.segments ? (Array.isArray(root.segments) ? root.segments : Object.values(root.segments)) : [];
 
                         if (mode === 'online') {
-                            addNotification("數據匯入", "正在同步數據...");
-                            if(mP.length > 0) await batchWrite('maps', mP);
-                            if(mS.length > 0) await batchWrite('markerStatuses', mS);
-                            if(gG.length > 0) await batchWrite('markerGroups', gG);
-                            if(segArray.length > 0) await batchWrite('segments', segArray);
-                            if(rawMarkers.length > 0) await batchWrite('markers', rawMarkers);
+                            // 關鍵修復：依序且完整Await所有寫入隊列
+                            await batchWrite('maps', mP);
+                            await batchWrite('markerStatuses', mS);
+                            await batchWrite('markerGroups', gG);
+                            await batchWrite('segments', segArray);
+                            await batchWrite('markers', rawMarkers);
+                            
+                            addNotification("同步完成", "所有資料已安全儲存，系統即將重新載入...");
+                            // 多給 2 秒緩衝，確保 Firestore 快取完全 Flush 且頁面重載不會切斷異步連線
+                            setTimeout(() => window.location.reload(), 2000);
                         } else {
                              LocalDB.saveData('markers', rawMarkers); 
                              LocalDB.saveData('segments', segArray); 
                              LocalDB.saveData('markerGroups', gG);
                              LocalDB.saveData('maps', mP);
                              LocalDB.saveData('markerStatuses', mS);
+                             window.location.reload();
                         }
-                        window.location.reload();
                       } catch(e) { 
-                        addNotification("匯入失敗", "格式錯誤");
+                        console.error("Import Error:", e);
+                        addNotification("導入異常", "檔案格式不正確或連線受阻");
+                        setIsImporting(false);
                       }
                  }; 
                  r.readAsText(f);
@@ -1232,7 +1222,8 @@
                                     {renderDynamicGroupList(markerGroups)}
                                 </div>}
                                 {sidebarTab==='manage' && <div className="space-y-6">
-                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3"><div className="flex items-center gap-2 mb-3 text-slate-300 text-xs font-bold uppercase tracking-wider"><Database size={14}/> 數據備份</div><div className="grid grid-cols-2 gap-2"><button onClick={handleExport} className="py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><Download size={12}/> 導出</button><div className="relative"><input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" /><button className="w-full h-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><FileUp size={12}/> 導入</button></div></div></div>
+                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3"><div className="flex items-center gap-2 mb-3 text-slate-300 text-xs font-bold uppercase tracking-wider"><Database size={14}/> 數據備份</div><div className="grid grid-cols-2 gap-2"><button onClick={handleExport} className="py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><Download size={12}/> 導出</button><div className="relative"><input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" disabled={isImporting}/><button className={`w-full h-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1 ${isImporting ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                                        {isImporting ? <Loader2 size={12} className="animate-spin"/> : <FileUp size={12}/>} 導入</button></div></div></div>
                                     <div className="bg-slate-800/50 rounded border border-slate-700 p-3">
                                         <div className="flex items-center justify-between mb-3"><div className="flex items-center gap-2 text-slate-300 text-xs font-bold uppercase tracking-wider"><Tag size={14}/> 狀態標籤</div><button onClick={()=>setStatusForm({label:'', color:'#3b82f6', isDefault: false})} className="p-1 rounded bg-blue-900/30 text-blue-400 hover:bg-blue-900/50"><Plus size={12}/></button></div>
                                         <div className="space-y-1">{markerStatuses.map(s=>(
