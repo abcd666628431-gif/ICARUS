@@ -78,7 +78,7 @@
 
         // --- Config ---
         let firebaseConfig = null; 
-        let appId = 'default-map-app'; 
+        let appId = 'icarus2-50e01'; 
         let app, auth, db; 
         let isConfigured = false;
 
@@ -90,7 +90,6 @@
             } catch (e) {} 
         }
 
-        // --- 更新為您提供的新 Firebase 配置 ---
         const manualConfig = { 
             apiKey: "AIzaSyDcH7BFp9xghWLdgvsLseo3XyJG_opf9A8",
             authDomain: "icarus2-50e01.firebaseapp.com",
@@ -285,12 +284,11 @@
             const [user, setUser] = useState(null);
             const [connectionError, setConnectionError] = useState(null);
             
-            // --- 右上角 ID 儲存邏輯強化 ---
+            // --- 右上角 ID 儲存邏輯 ---
             const [customName, setCustomName] = useState(() => localStorage.getItem('ops_username') || '');
             const [nameInput, setNameInput] = useState(''); 
             const [isEditingName, setIsEditingName] = useState(false);
 
-            // 當 customName 改變時，同步寫入 localStorage
             useEffect(() => {
                 if (customName) {
                     localStorage.setItem('ops_username', customName);
@@ -379,7 +377,7 @@
 
             useEffect(() => {
                 if (mode !== 'online' || !user) {
-                    setActiveUsersList([{ id: 'local', name: '我 (離線)', isSelf: true }]);
+                    setActiveUsersList([{ id: 'local', name: customName || '我 (離線)', isSelf: true }]);
                     return;
                 }
 
@@ -425,7 +423,7 @@
                         active.sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.name.localeCompare(b.name)));
                         setActiveUsersList(active);
                     }, (error) => {
-                        console.warn("Presence listener failed (Permissions?):", error.code);
+                        console.warn("Presence listener failed:", error.code);
                         isPresenceFeatureWorking = false;
                         if (heartbeatInterval) clearInterval(heartbeatInterval);
                         setActiveUsersList([{ id: user.uid, name: (customName || user.uid.slice(0,4)) + ' (連線中)', isSelf: true }]);
@@ -1180,7 +1178,6 @@
                                     </div>
                                 )}
                             </div>
-                            {/* 右上角 ID 儲存區域 */}
                             <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => { setIsEditingName(true); setNameInput(customName || (user ? user.uid.slice(0,4) : '')); }}>
                                 <span className={`w-2 h-2 rounded-full mr-2 ${mode==='online'?'bg-green-500 animate-pulse':'bg-slate-500'}`}></span>
                                 {isEditingName ? (
@@ -1334,7 +1331,7 @@
                             </div>
                         </div>
                     )}
-                    {lightboxImg && <div className="fixed inset-0 bg-black/90 z-[300] flex items-center justify-center p-4 onClick={() => setLightboxImg(null)} animate-fadeIn"><img src={lightboxImg} className="max-w-full max-h-full object-contain shadow-2xl" onClick={e=>e.stopPropagation()} /><button onClick={()=>setLightboxImg(null)} className="absolute top-6 right-6 text-white hover:text-red-400"><X size={32}/></button></div>}
+                    {lightboxImg && <div className="fixed inset-0 bg-black/90 z-[300] flex items-center justify-center p-4" onClick={() => setLightboxImg(null)}><img src={lightboxImg} className="max-w-full max-h-full object-contain shadow-2xl animate-fadeIn" onClick={e=>e.stopPropagation()} /><button onClick={()=>setLightboxImg(null)} className="absolute top-6 right-6 text-white hover:text-red-400"><X size={32}/></button></div>}
                 </ErrorBoundary>
             );
         }
