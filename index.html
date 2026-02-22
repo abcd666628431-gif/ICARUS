@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>戰術指揮中心 v4.0.0 (Multi-Map Upgrade)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: { 
+                        slate: { 850: '#151f32', 900: '#0f172a', 950: '#020617' }, 
+                        ops: { bg: '#050a14', panel: '#1e293b', accent: '#3b82f6' } 
+                    },
+                    fontFamily: { 
+                        sans: ['Noto Sans TC', 'sans-serif'], 
+                        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'] 
+                    },
+                    animation: { 
+                        fadeIn: 'fadeIn 0.2s ease-out forwards', 
+                        slideInRight: 'slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards', 
+                        slideUp: 'slideUp 0.3s ease-out forwards' 
+                    },
+                    keyframes: {
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+                        slideInRight: { '0%': { transform: 'translateX(100%)' }, '100%': { transform: 'translateX(0)' } },
+                        slideUp: { '0%': { opacity: '0', transform: 'translateY(20px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://gs.jurieo.com/gemini/fonts-googleapis/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050a14; color: #e2e8f0; font-family: 'Noto Sans TC', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+        .cursor-crosshair { cursor: crosshair; }
+        .grid-cols-16 { grid-template-columns: repeat(16, minmax(0, 1fr)); }
+        .grid-rows-16 { grid-template-rows: repeat(16, minmax(0, 1fr)); }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .glass-panel { background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(12px); border: 1px solid rgba(51, 65, 85, 0.5); }
+        .solid-panel { background: #0f172a; border: 1px solid #1e293b; }
+        .tactical-grid { background-image: linear-gradient(rgba(59, 130, 246, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(59, 130, 246, 0.08) 1px, transparent 1px); background-size: 20px 20px; }
+        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px; width: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; margin-top: -5px; box-shadow: 0 0 5px rgba(59, 130, 246, 0.5); border: 2px solid #1e293b; }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #334155; border-radius: 2px; }
+        .draggable-item { cursor: grab; }
+        .draggable-item:active { cursor: grabbing; }
+        .will-change-transform { will-change: transform; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root" class="h-full flex flex-col"></div>
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.263.1?external=react",
+            "firebase/app": "https://gs.jurieo.com/gemini/gstatic/firebasejs/10.7.1/firebase-app.js",
+            "firebase/auth": "https://gs.jurieo.com/gemini/gstatic/firebasejs/10.7.1/firebase-auth.js",
+            "firebase/firestore": "https://gs.jurieo.com/gemini/gstatic/firebasejs/10.7.1/firebase-firestore.js"
+        }
+    }
+    </script>
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+        import { getFirestore, collection, doc, setDoc, onSnapshot, query, deleteDoc, serverTimestamp, getDocs, writeBatch, orderBy, limit } from 'firebase/firestore';
+        import { Map as MapIcon, Plus, Minus, Maximize, Shield, Skull, MessageSquare, Navigation, Upload, RefreshCw, Eye, EyeOff, Settings, Filter, Trash2, Edit2, ChevronLeft, MapPin, Menu, Crosshair, Grid, Image as ImageIcon, X, Download, FileUp, Database, AlertTriangle, ExternalLink, Radio, Layers, Search, Wifi, WifiOff, Loader2, Check, Camera, ZoomIn, Target, History, GripVertical, ChevronDown, ChevronRight as ChevronRightIcon, RefreshCcw, RotateCcw, Bell, Volume2, VolumeX, User, Music, Monitor, Zap, Tag, Copy, Lock, Unlock, Users, Star } from 'lucide-react';
+
+        // --- Config ---
+        let firebaseConfig = null; 
+        let appId = 'default-map-app'; 
+        let app, auth, db; 
+        let isConfigured = false;
+
+        if (typeof window.__firebase_config !== 'undefined') { 
+            try { 
+                firebaseConfig = JSON.parse(window.__firebase_config); 
+                if (typeof window.__app_id !== 'undefined') appId = window.__app_id; 
+                isConfigured = true; 
+            } catch (e) {} 
+        } else if (typeof __firebase_config !== 'undefined') { 
+            try { 
+                firebaseConfig = JSON.parse(__firebase_config); 
+                if (typeof __app_id !== 'undefined') appId = __app_id; 
+                isConfigured = true; 
+            } catch (e) {} 
+        }
+
+        const manualConfig = { 
+            apiKey: "AIzaSyDGsJ7WvLiZokUt8fSnsMOmzu64yN9bQxs", 
+            authDomain: "cloud-714ce.firebaseapp.com", 
+            projectId: "cloud-714ce", 
+            storageBucket: "cloud-714ce.firebasestorage.app", 
+            messagingSenderId: "793151737559", 
+            appId: "1:793151737559:web:924dc29dfbd21958542a92"
+        };
+
+        if (!isConfigured && manualConfig.apiKey && manualConfig.apiKey.length > 5) { 
+            firebaseConfig = manualConfig; 
+            isConfigured = true; 
+        }
+
+        if (isConfigured) { 
+            try { 
+                app = initializeApp(firebaseConfig); 
+                auth = getAuth(app); 
+                db = getFirestore(app); 
+            } catch(e) { 
+                console.error("Firebase init failed", e); 
+                isConfigured = false; 
+            } 
+        }
+
+        // --- LocalDB ---
+        const LocalDB = {
+            prefix: 'tactical_ops_v2_',
+            getData: (c) => { 
+                try { 
+                    const res = JSON.parse(localStorage.getItem(LocalDB.prefix + c) || '[]'); 
+                    return Array.isArray(res) ? res : []; 
+                } catch { return []; } 
+            },
+            saveData: (c, d) => { 
+                localStorage.setItem(LocalDB.prefix + c, JSON.stringify(d)); 
+                window.dispatchEvent(new CustomEvent('ldb-upd', { detail: { c } })); 
+            },
+            setDoc: async (c, id, d) => { 
+                const items = LocalDB.getData(c); 
+                const idx = items.findIndex(i => i.id === id); 
+                const nd = { ...d, id, _upd: Date.now() }; 
+                if (idx >= 0) items[idx] = { ...items[idx], ...nd }; 
+                else items.push(nd); 
+                LocalDB.saveData(c, items); 
+            },
+            deleteDoc: async (c, id) => { 
+                const items = LocalDB.getData(c); 
+                LocalDB.saveData(c, items.filter(i => i.id !== id)); 
+            },
+            subscribe: (c, cb) => { 
+                const h = (e) => { if (!e.detail || e.detail.c === c) cb(LocalDB.getData(c)); }; 
+                window.addEventListener('ldb-upd', h); 
+                cb(LocalDB.getData(c)); 
+                return () => window.removeEventListener('ldb-upd', h); 
+            }
+        };
+
+        const MAP_SIZE = 2000; 
+        const BORDER_WIDTH = 2;
+        const DEFAULT_GROUPS = [ 
+            { id: 'danger', label: '危險', color: '#ef4444', order: 0 }, 
+            { id: 'loot', label: '資源', color: '#facc15', order: 1 }, 
+            { id: 'loot_gold', label: '黃金', color: '#fbbf24', parentId: 'loot', order: 0 }, 
+            { id: 'loot_iron', label: '鋼鐵', color: '#94a3b8', parentId: 'loot', order: 1 }, 
+            { id: 'loot_oil', label: '石油', color: '#0f172a', parentId: 'loot', order: 2 }, 
+            { id: 'base', label: '據點', color: '#22c55e', order: 2 }, 
+            { id: 'info', label: '情報', color: '#60a5fa', order: 3 } 
+        ];
+        const DEFAULT_STATUSES = [ 
+            { id: 'not_started', label: '未開採', color: '#64748b', isDefault: true }, 
+            { id: 'in_progress', label: '進行中', color: '#3b82f6', isDefault: false }, 
+            { id: 'completed', label: '已開採', color: '#10b981', isDefault: false } 
+        ];
+
+        const generateGridIds = () => { 
+            const l = 'ABCDEFGHIJKLMNOP'.split(''); 
+            const ids = []; 
+            for(let r=1;r<=16;r++) for(let i=0;i<16;i++) ids.push(`${l[i]}${r}`); 
+            return ids; 
+        };
+        const gridIds = generateGridIds();
+
+        // --- Error Boundary ---
+        class ErrorBoundary extends React.Component {
+            constructor(props) { super(props); this.state = { hasError: false }; }
+            static getDerivedStateFromError(error) { return { hasError: true }; }
+            componentDidCatch(error, errorInfo) { console.error("App Crash:", error, errorInfo); }
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div className="flex flex-col items-center justify-center h-screen bg-[#050a14] text-red-500 p-8 text-center">
+                            <AlertTriangle size={64} className="mb-4" />
+                            <h2 className="text-2xl font-bold mb-2">系統發生嚴重錯誤</h2>
+                            <p className="text-slate-400 mb-6">可能因為資料結構損毀或無限迴圈導致。</p>
+                            <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="px-6 py-3 bg-red-900/50 border border-red-700 rounded text-white hover:bg-red-800 transition flex items-center"><RefreshCcw className="mr-2" size={16}/> 重置所有本地數據並重載</button>
+                        </div>
+                    );
+                }
+                return this.props.children;
+             }
+        }
+
+        // --- Memoized Components ---
+        const MapGridCell = memo(({ id, segment, interactionMode, onClick }) => {
+            const unlocked = segment?.status === 'unlocked';
+            const displayUrl = !unlocked ? null : segment.imageUrl;
+            
+            return (
+                <div onClick={(e) => onClick(e, id)} className={`relative transition-all duration-300 group ${unlocked?'bg-slate-900':'bg-black'} ${interactionMode==='map_edit'?'border border-slate-600 hover:border-blue-500 hover:bg-slate-800/50 cursor-pointer z-50':'border border-white/15'}`}>
+                    {unlocked && (displayUrl ? 
+                         <img 
+                             src={displayUrl} 
+                             className="w-full h-full object-cover opacity-90 pointer-events-none select-none z-0 relative"
+                             onError={e=>e.target.style.display='none'}
+                             loading="lazy"
+                             decoding="async"
+                        /> : 
+                         <div className="w-full h-full opacity-10 bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')] pointer-events-none select-none z-0 relative"></div>
+                    )}
+                    <span className={`absolute top-1 left-1 text-xs font-mono font-bold pointer-events-none select-none z-1 drop-shadow-md ${interactionMode==='map_edit'?'text-blue-500':'text-white/70'}`}>{id}</span>
+                    {interactionMode==='map_edit' && !unlocked && <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-20"><Plus className="text-blue-500" size={24}/></div>}
+                </div>
+            );
+        }, (prev, next) => {
+            return prev.id === next.id && prev.segment === next.segment && prev.interactionMode === next.interactionMode;
+        });
+
+        const MapMarker = memo(({ marker, scale, isDragging, onClick, renderIcon, getGroup, getStatus, markerClass }) => {
+            const status = getStatus(marker.status);
+            const statusStyle = status ? {boxShadow: `0 0 0 2px ${status.color}, 0 0 10px ${status.color}80`} : {};
+            
+            return (
+                <div className={`absolute z-[60] hover:z-[100] group cursor-pointer ${isDragging ? 'pointer-events-none' : ''}`} style={{left:`${marker.x}%`, top:`${marker.y}%`, transform:`translate(-50%,-50%) scale(${1/scale})`}} onClick={e=>onClick(e, marker)}>
+                    <div className={`relative ${markerClass} transition-transform duration-200 hover:scale-125 rounded-full`} style={statusStyle}>
+                        {renderIcon(marker.type, marker.size)}
+                        {!isDragging && <div className="absolute left-1/2 bottom-full mb-3 -translate-x-1/2 w-max max-w-[250px] bg-slate-900/95 text-xs p-2 rounded border border-slate-600 text-white opacity-0 group-hover:opacity-100 pointer-events-none z-50 text-center transition-opacity shadow-xl font-sans whitespace-pre-wrap break-words">
+                            {status && <div className="mb-1 text-[10px] uppercase tracking-wider font-bold" style={{color: status.color}}>{status.label}</div>}
+                            {marker.note||getGroup(marker.type).label}
+                        </div>}
+                    </div>
+                </div>
+            );
+        }, (prev, next) => {
+            return prev.marker === next.marker && prev.scale === next.scale && prev.isDragging === next.isDragging;
+        });
+
+        function LoadingScreen({ onForceOffline, errorMsg }) {
+             return (
+                <div className="flex flex-col items-center justify-center h-screen bg-[#050a14] text-blue-500">
+                    <Loader2 size={48} className="animate-spin mb-4" />
+                    <div className="text-xs font-mono uppercase tracking-widest animate-pulse mb-6">正在連線至指揮中心...</div>
+                    {errorMsg && <div className="bg-red-900/30 border border-red-800 text-red-200 p-4 rounded mb-4 max-w-md text-center text-sm"><p className="font-bold mb-1">連線失敗</p><p className="opacity-80">{errorMsg}</p></div>}
+                    <button onClick={onForceOffline} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs rounded border border-slate-600 transition-colors">連線過久？切換至離線模式</button>
+                </div>
+            );
+         }
+
+        function WelcomeScreen({ onStartOffline }) {
+            return (
+                <div className="flex flex-col items-center justify-center h-screen bg-[#050a14] text-slate-200 p-6 relative overflow-hidden">
+                    <div className="max-w-2xl w-full bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-8 z-10 relative">
+                        <div className="flex items-center gap-4 mb-8 border-b border-slate-800 pb-6"><div className="p-3 bg-blue-600/20 rounded-lg border border-blue-500/50 text-blue-400"><MapIcon size={32} /></div><div><h1 className="text-2xl font-bold text-white tracking-wider">戰術地圖初始化</h1><p className="text-slate-500 text-sm">TACTICAL OPS SYSTEM V4.0.0</p></div></div>
+                        <div className="grid md:grid-cols-2 gap-6 mb-8">
+                            <button onClick={onStartOffline} className="flex flex-col items-start p-5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-750 transition-all group text-left"><div className="flex items-center gap-2 text-emerald-400 mb-2 font-bold group-hover:text-emerald-300"><WifiOff size={20} /> 單機離線模式</div><p className="text-xs text-slate-400 leading-relaxed">資料儲存於本機。<br/>無需設定，立即使用。</p><span className="mt-4 text-xs bg-emerald-900/30 text-emerald-400 px-2 py-1 rounded border border-emerald-800 group-hover:bg-emerald-600 group-hover:text-white transition-colors">啟動系統 &rarr;</span></button>
+                            <div className="flex flex-col items-start p-5 rounded-lg border border-slate-700 bg-slate-950/50 opacity-70"><div className="flex items-center gap-2 text-blue-400 mb-2 font-bold"><Wifi size={20} /> 多人連線模式</div><p className="text-xs text-slate-500 leading-relaxed">需要 Firebase 設定。<br/><span className="text-yellow-600">未檢測到設定檔。</span></p><div className="mt-4 text-xs text-slate-600 flex items-center gap-1"><AlertTriangle size={10} /> 請編輯 HTML 檔案</div></div>
+                        </div>
+                        <div className="text-center border-t border-slate-800 pt-4"><p className="text-[10px] text-slate-600 font-mono">SYSTEM READY</p></div>
+                    </div>
+                </div>
+            );
+        }
+
+        function NotificationToast({ notifications }) {
+            return (
+                <div className="absolute bottom-4 left-4 z-[60] flex flex-col-reverse gap-2 pointer-events-none">
+                    {notifications.map(n => (
+                        <div key={n.id} className="bg-slate-900/90 border-l-4 border-emerald-500 text-white p-3 rounded shadow-lg backdrop-blur animate-slideUp flex items-center min-w-[200px]">
+                            <div className="mr-3 p-2 bg-emerald-500/20 rounded-full"><Bell size={16} className="text-emerald-400"/></div>
+                            <div>
+                                <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">{n.title}</div>
+                                <div className="text-sm font-medium whitespace-pre-wrap">{n.message}</div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        function TacticalMap() {
+            const [mode, setMode] = useState(isConfigured ? 'online' : 'unconfigured');
+            const [user, setUser] = useState(null);
+            const [connectionError, setConnectionError] = useState(null);
+            
+            const [customName, setCustomName] = useState(() => localStorage.getItem('ops_username') || '');
+            const [isEditingName, setIsEditingName] = useState(false);
+            
+            const [soundEnabled, setSoundEnabled] = useState(true);
+            const [viewQuality, setViewQuality] = useState('original');
+            
+            const [isEditMode, setIsEditMode] = useState(false);
+            const [maps, setMaps] = useState([]); 
+            const [currentMapId, setCurrentMapId] = useState('default');
+            const [markerStatuses, setMarkerStatuses] = useState(DEFAULT_STATUSES); 
+            const [statusForm, setStatusForm] = useState({});
+            const [isCreateMapModalOpen, setIsCreateMapModalOpen] = useState(false);
+            const [newMapName, setNewMapName] = useState("");
+            const [editingMapId, setEditingMapId] = useState(null);
+            const [mapToDelete, setMapToDelete] = useState(null);
+            const [mapToCopy, setMapToCopy] = useState(null);
+            const [copyMapNameInput, setCopyMapNameInput] = useState("");
+            
+            const [activeUsersList, setActiveUsersList] = useState([]);
+            const [lastUsedGroupId, setLastUsedGroupId] = useState('info');
+            const [logPage, setLogPage] = useState(1);
+            const LOGS_PER_PAGE = 10;
+
+            const [scale, setScale] = useState(1);
+            const [offset, setOffset] = useState({ x: 0, y: 0 });
+            const [isDragging, setIsDragging] = useState(false);
+            const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+            const dragStartPosRef = useRef({ x: 0, y: 0 });
+            const isMouseDownRef = useRef(false);
+            const hasDraggedRef = useRef(false);
+            
+            const [markers, setMarkers] = useState([]);
+            const [segments, setSegments] = useState({});
+            const [markerGroups, setMarkerGroups] = useState([]);
+            const [actionLogs, setActionLogs] = useState([]);
+            const isGroupsLoaded = useRef(false);
+            
+            const [notifications, setNotifications] = useState([]);
+            const prevMarkersRef = useRef(null);
+            
+            const [activeCell, setActiveCell] = useState(null);
+            const [selectedMarker, setSelectedMarker] = useState(null);
+            const [draftMarker, setDraftMarker] = useState(null); 
+            const [interactionMode, setInteractionMode] = useState('tactical');
+            const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
+            const [deletingGroupId, setDeletingGroupId] = useState(null);
+            
+            const [tempNote, setTempNote] = useState("");
+            const [tempImgUrl, setTempImgUrl] = useState("");
+            const [tempMarkerImg, setTempMarkerImg] = useState("");
+            const [tempSize, setTempSize] = useState(16);
+            const [selectedGroupId, setSelectedGroupId] = useState('info');
+            const [newMarkerPos, setNewMarkerPos] = useState(null);
+            
+            const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+            const [sidebarTab, setSidebarTab] = useState('filter');
+            const [hiddenGroupIds, setHiddenGroupIds] = useState(new Set());
+            const [hiddenNoteKeys, setHiddenNoteKeys] = useState(new Set());
+            const [expandedGroupIds, setExpandedGroupIds] = useState(new Set());
+            const [editingGroup, setEditingGroup] = useState(null);
+            const [groupForm, setGroupForm] = useState({});
+            const [isProcessingImage, setIsProcessingImage] = useState(false);
+            const [isImporting, setIsImporting] = useState(false);
+            const [countdown, setCountdown] = useState(60);
+            const [draggedGroup, setDraggedGroup] = useState(null);
+            const [lightboxImg, setLightboxImg] = useState(null);
+            const [lightboxScale, setLightboxScale] = useState(1);
+            const fileInputRef = useRef(null);
+            const containerRef = useRef(null);
+
+            const panelClass = 'glass-panel';
+            const markerClass = 'filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]';
+            
+            const getMapName = (id) => maps.find(m => m.id === id)?.name || '正在載入...';
+
+            useEffect(() => {
+                if (mode !== 'online' || !user) {
+                    setActiveUsersList([{ id: 'local', name: '我 (離線)', isSelf: true }]);
+                    return;
+                }
+
+                let heartbeatInterval;
+                let unsubscribe;
+                let isPresenceFeatureWorking = true;
+
+                const sendHeartbeat = async () => {
+                    if (!isPresenceFeatureWorking) return;
+                    try {
+                        const presenceRef = doc(db, 'artifacts', appId, 'public', 'data', 'presence', user.uid);
+                        await setDoc(presenceRef, {
+                            user: customName || user.uid.slice(0, 4),
+                            lastSeen: serverTimestamp(),
+                            userAgent: navigator.userAgent
+                        }, { merge: true });
+                    } catch (e) {
+                        console.warn("Presence heartbeat failed:", e.code);
+                        if (e.code === 'permission-denied') {
+                            isPresenceFeatureWorking = false;
+                            if (heartbeatInterval) clearInterval(heartbeatInterval);
+                        }
+                    }
+                };
+
+                try {
+                    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'presence'));
+                    unsubscribe = onSnapshot(q, (snapshot) => {
+                        const now = Date.now();
+                        const active = [];
+                        snapshot.forEach(doc => {
+                            const data = doc.data();
+                            let lastSeenTime = 0;
+                            if (data.lastSeen) {
+                                if (typeof data.lastSeen.toMillis === 'function') lastSeenTime = data.lastSeen.toMillis();
+                                else if (data.lastSeen.seconds) lastSeenTime = data.lastSeen.seconds * 1000;
+                                else lastSeenTime = data.lastSeen;
+                            }
+                            if (now - lastSeenTime < 120000) {
+                                active.push({ id: doc.id, name: data.user || 'Unknown', isSelf: doc.id === user.uid });
+                            }
+                        });
+                        active.sort((a, b) => (a.isSelf ? -1 : b.isSelf ? 1 : a.name.localeCompare(b.name)));
+                        setActiveUsersList(active);
+                    }, (error) => {
+                        console.warn("Presence listener failed (Permissions?):", error.code);
+                        isPresenceFeatureWorking = false;
+                        if (heartbeatInterval) clearInterval(heartbeatInterval);
+                        setActiveUsersList([{ id: user.uid, name: (customName || user.uid.slice(0,4)) + ' (連線中)', isSelf: true }]);
+                    });
+
+                    sendHeartbeat();
+                    heartbeatInterval = setInterval(sendHeartbeat, 60000);
+                } catch (e) {
+                    console.error("Presence init failed", e);
+                }
+
+                return () => {
+                    if (heartbeatInterval) clearInterval(heartbeatInterval);
+                    if (unsubscribe) unsubscribe();
+                };
+            }, [mode, user, customName]);
+
+            const isGroupVisible = (groupId, visited = new Set()) => {
+                if (visited.has(groupId)) return true;
+                visited.add(groupId);
+                if (hiddenGroupIds.has(groupId)) return false;
+                const group = markerGroups.find(g => g.id === groupId);
+                if (group && group.parentId && group.parentId !== groupId) {
+                    return isGroupVisible(group.parentId, visited);
+                }
+                return true;
+            };
+
+            const isMarkerVisible = (m) => {
+                 if (!isGroupVisible(m.type)) return false;
+                 const k = `${m.type}::${m.note ? m.note.trim() : ''}`;
+                 if (hiddenNoteKeys.has(k)) return false;
+                 return true;
+             };
+            
+            const currentMarkers = useMemo(() => markers.filter(m => (m.mapId === currentMapId) || (!m.mapId && currentMapId === 'default')), [markers, currentMapId]);
+            const currentSegments = useMemo(() => {
+                const filtered = {};
+                Object.entries(segments).forEach(([k, v]) => {
+                    if (v && (v.mapId === currentMapId || (!v.mapId && currentMapId === 'default'))) {
+                        const gridId = v.gridId || (v.id.includes('_') ? v.id.split('_').pop() : v.id);
+                        filtered[gridId] = v;
+                    }
+                });
+                return filtered;
+            }, [segments, currentMapId]);
+
+            const getTime = (t) => { if(!t) return Date.now(); return t.toMillis ? t.toMillis() : (t.seconds ? t.seconds*1000 : t); };
+            const historyNotes = useMemo(() => { const rel = markers.filter(m => m.type === selectedGroupId).sort((a,b) => getTime(b.createdAt)-getTime(a.createdAt)); const n = rel.map(m => m.note).filter(t => t && t.trim().length > 0); return [...new Set(n)].slice(0, 20); }, [markers, selectedGroupId]);
+            const sortedGroups = useMemo(() => { return [...markerGroups].sort((a, b) => (a.order || 0) - (b.order || 0)); }, [markerGroups]);
+            const formatTime = (ts) => { if(!ts) return '--:--'; try { const t = getTime(ts); if(isNaN(t)) return '--:--'; const d = new Date(t); if(isNaN(d.getTime())) return '--:--'; return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`; } catch(e) { return '--:--'; } };
+            
+            const getCurrentUserName = () => customName || (user ? user.uid.slice(0,4) : '....');
+            const getStatus = useCallback((id) => markerStatuses.find(s => s.id === id), [markerStatuses]);
+            const getGroup = useCallback((id) => markerGroups.find(g=>g.id===id) || DEFAULT_GROUPS.find(g=>g.id===id) || {id, label:'未知', color:'#999'}, [markerGroups]);
+
+            const getGridIdFromCoords = (x, y) => {
+                if (x < 0 || x > 100 || y < 0 || y > 100) return "UNK";
+                const colIndex = Math.floor((x / 100) * 16);
+                const rowIndex = Math.floor((y / 100) * 16);
+                const letters = 'ABCDEFGHIJKLMNOP'.split('');
+                return `${letters[Math.min(colIndex, 15)]}${rowIndex + 1}`;
+            };
+
+            const toggleSound = () => {
+                const newState = !soundEnabled;
+                setSoundEnabled(newState);
+                if(newState) playNotificationSound();
+             };
+
+            const addNotification = (title, message) => {
+                const id = Date.now();
+                setNotifications(prev => [...prev, { id, title, message }]);
+                if (soundEnabled) playNotificationSound();
+                setTimeout(() => {
+                    setNotifications(prev => prev.filter(n => n.id !== id));
+                }, 5000);
+            };
+
+            const getMarkerLabel = (m) => getGroup(m.type).label;
+
+            useEffect(() => {
+                if (prevMarkersRef.current === null) {
+                    if (markers.length > 0) prevMarkersRef.current = new Set(markers.filter(m => m.published !== false).map(m => m.id));
+                    else prevMarkersRef.current = new Set();
+                    return;
+                }
+                const currentPublishedMarkers = markers.filter(m => m.published !== false);
+                const currentIdSet = new Set(currentPublishedMarkers.map(m => m.id));
+                const newPublishedMarkers = currentPublishedMarkers.filter(m => !prevMarkersRef.current.has(m.id));
+                
+                if (newPublishedMarkers.length > 0) {
+                    newPublishedMarkers.forEach(m => {
+                        if (m.author === getCurrentUserName()) return;
+                        const markerTime = getTime(m.createdAt);
+                        const timeDiff = Date.now() - markerTime;
+                        if (timeDiff < 10000 && timeDiff > -5000) {
+                            const gridId = getGridIdFromCoords(m.x, m.y);
+                            const label = getMarkerLabel(m);
+                            const notePart = m.note ? ` ${m.note}` : '';
+                            const mName = getMapName(m.mapId);
+                            addNotification(`ID: ${m.author}`, `${mName}\n新增標記 ${gridId}[${label}]${notePart}`);
+                        }
+                    });
+                }
+                prevMarkersRef.current = currentIdSet;
+            }, [markers, customName, maps]);
+
+            useEffect(() => {
+                 if (mode === 'offline') setUser({ uid: 'local_cmd' });
+                 else if (mode === 'online' && auth) {
+                    const init = async () => { try { if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) await signInWithCustomToken(auth, window.__initial_auth_token); else await signInAnonymously(auth); } catch (e) { setConnectionError(e.message); } };
+                    init(); return onAuthStateChanged(auth, u => { if (u) { setUser(u); setConnectionError(null); } }, (e) => setConnectionError(e.message));
+                }
+            }, [mode]);
+
+            const handleSyncError = (e) => {
+                console.warn("Sync Error:", e);
+                if (e.code === 'permission-denied') setConnectionError("權限不足：請前往 Firebase Console > Firestore Database > Rules，將規則修改為 allow read, write: if true;");
+                else if (e.code === 'unavailable') setConnectionError("連線中斷：無法連接到 Firebase。");
+            };
+
+            useEffect(() => {
+                if (mode === 'unconfigured') return;
+                let unM, unS, unG, unL, unSt, unMp;
+                if (mode === 'online' && user && db) {
+                    unM = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'markers')), (s) => setMarkers(s.docs.map(d=>({id:d.id,...d.data()}))), handleSyncError);
+                    unS = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'segments')), (s) => { const d={}; s.forEach(doc=>d[doc.id]=doc.data()); setSegments(d); }, handleSyncError);
+                    unG = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'markerGroups')), (s) => {
+                         if(!s.empty) { setMarkerGroups(s.docs.map(d=>d.data())); isGroupsLoaded.current = true; }
+                         else { setMarkerGroups([]); }
+                     }, handleSyncError);
+                    unSt = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'markerStatuses'), (s) => setMarkerStatuses(s.empty ? DEFAULT_STATUSES : s.docs.map(d=>d.data())), handleSyncError);
+                    unMp = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'maps'), (s) => {
+                        const mList = s.docs.map(d=>d.data());
+                        if (mList.length === 0) {
+                            const defMap = {id:'default', name:'主地圖', order:0};
+                            setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', 'default'), defMap); 
+                            setMaps([defMap]);
+                        } else { 
+                            setMaps(mList.sort((a,b)=>(a.order||0)-(b.order||0))); 
+                        }
+                    }, handleSyncError);
+                    unL = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'logs'), orderBy('timestamp', 'desc'), limit(100)), (s) => setActionLogs(s.docs.map(d=>({id:d.id,...d.data()}))), e => console.log("Logs error:", e));
+                } else if (mode === 'offline') {
+                    unM = LocalDB.subscribe('markers', setMarkers);
+                    unS = LocalDB.subscribe('segments', d => { const m={}; d.forEach(s=>m[s.id]=s); setSegments(m); });
+                    unG = LocalDB.subscribe('markerGroups', d => { if(d.length) setMarkerGroups(d); else setMarkerGroups([]); });
+                    unSt = LocalDB.subscribe('markerStatuses', d => setMarkerStatuses(d.length ? d : DEFAULT_STATUSES));
+                    unMp = LocalDB.subscribe('maps', d => {
+                        if(d.length) {
+                            setMaps(d.sort((a,b)=>(a.order||0)-(b.order||0)));
+                        } else {
+                            const defMap = {id:'default',name:'主地圖',order:0};
+                            LocalDB.setDoc('maps', 'default', defMap);
+                            setMaps([defMap]);
+                        }
+                    });
+                    unL = LocalDB.subscribe('logs', d => { if(Array.isArray(d)) setActionLogs(d.sort((a,b)=>b.timestamp-a.timestamp).slice(0, 100)); else setActionLogs([]); });
+                }
+                return () => { if(unM)unM(); if(unS)unS(); if(unG)unG(); if(unL)unL(); if(unSt)unSt(); if(unMp)unMp(); };
+            }, [mode, user]);
+
+            useEffect(() => { const t = setInterval(() => setCountdown(p => (p>0?p-1:60)), 1000); return () => clearInterval(t); }, []);
+
+            // --- 核心修復：使用嚴格串行寫入以解決 Write Stream Exhausted 錯誤 ---
+            const batchWrite = async (collectionName, items) => {
+                if (items.length === 0) return;
+                const delay = (ms) => new Promise(res => setTimeout(res, ms));
+
+                if (collectionName === 'segments') {
+                    // 對於包含 Base64 影像的地圖格子，使用逐一串行寫入
+                    for (let i = 0; i < items.length; i++) {
+                        const item = items[i];
+                        const ref = doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id);
+                        let success = false;
+                        let retries = 5;
+                        while (!success && retries > 0) {
+                            try {
+                                await setDoc(ref, item);
+                                success = true;
+                                await delay(800); // 檔案間延遲
+                            } catch (e) {
+                                if (e.code === 'resource-exhausted') {
+                                    await delay(15000); // 資源耗盡時的指數退避
+                                    retries--;
+                                } else throw e;
+                            }
+                        }
+                    }
+                } else {
+                    // 一般小資料維持分段批量寫入
+                    const CHUNK_SIZE = 50;
+                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                        const chunk = items.slice(i, i + CHUNK_SIZE);
+                        const batch = writeBatch(db);
+                        chunk.forEach(item => {
+                            const ref = doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id);
+                            batch.set(ref, item);
+                        });
+                        
+                        let success = false;
+                        let retries = 3;
+                        while (!success && retries > 0) {
+                            try {
+                                await batch.commit();
+                                success = true;
+                                await delay(1000);
+                            } catch (e) {
+                                if (e.code === 'resource-exhausted') {
+                                    await delay(10000);
+                                    retries--;
+                                } else throw e;
+                            }
+                        }
+                    }
+                }
+            };
+
+            const logAction = async (actionType, description, undoData = null) => {
+                const logEntry = {
+                    id: `log_${Date.now()}_${Math.random().toString(36).substr(2,4)}`,
+                    timestamp: mode === 'online' ? serverTimestamp() : Date.now(),
+                    user: getCurrentUserName(),
+                    type: actionType,
+                    desc: description,
+                    undo: undoData
+                };
+                if(mode === 'online') await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'logs'), logEntry.id), logEntry);
+                else await LocalDB.setDoc('logs', logEntry.id, logEntry);
+            };
+
+            const handleUndo = async (logItem) => {
+                if (!logItem.undo) return;
+                const { action, collection: col, id, data } = logItem.undo;
+                try {
+                    if (action === 'create') {
+                        if(mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', col, id), data); else await LocalDB.setDoc(col, id, data);
+                    } else if (action === 'delete') {
+                        if(mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', col, id)); else await LocalDB.deleteDoc(col, id);
+                    } else if (action === 'update') {
+                        if(mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', col, id), data, {merge: true}); else await LocalDB.setDoc(col, id, data);
+                    }
+                    addNotification("操作提醒", "已成功還原先前動作");
+                } catch (e) { 
+                    console.error("Undo failed", e); 
+                    addNotification("錯誤", "還原操作失敗"); 
+                }
+            };
+
+            const handleClosePanel = () => {
+                if (draftMarker) {
+                    const gridId = getGridIdFromCoords(draftMarker.x, draftMarker.y);
+                    const label = getMarkerLabel(draftMarker);
+                    const authorTitle = `ID: ${getCurrentUserName()}`;
+                    const mapName = getMapName(draftMarker.mapId);
+                    
+                    if (draftMarker.published === false) {
+                        handleAction('updateMarker', draftMarker.id, { ...draftMarker, published: true, createdAt: Date.now() });
+                        logAction('create', `新增: [${gridId}] ${label}`, { action: 'delete', collection: 'markers', id: draftMarker.id });
+                        addNotification(authorTitle, `${mapName}\n新增標記 ${gridId}[${label}]${draftMarker.note ? ' ' + draftMarker.note : ''}`);
+                    } else {
+                        const hasChanged = draftMarker.type !== selectedMarker.type || draftMarker.status !== selectedMarker.status || draftMarker.size !== selectedMarker.size || (draftMarker.note || '') !== (selectedMarker.note || '') || (draftMarker.image || '') !== (selectedMarker.image || '');
+                        if (hasChanged) {
+                            handleAction('updateMarker', draftMarker.id, draftMarker);
+                            if (draftMarker.status !== selectedMarker.status) {
+                                const newStatusLabel = getStatus(draftMarker.status)?.label || '未知狀態';
+                                addNotification(authorTitle, `${mapName}\n更新狀態 ${gridId}[${label}] > ${newStatusLabel}`);
+                            } else {
+                                addNotification(authorTitle, `${mapName}\n更新標記 ${gridId}[${label}]`);
+                            }
+                        }
+                    }
+                }
+                setSelectedMarker(null);
+                setDraftMarker(null);
+            };
+
+            const handleAction = async (action, ...args) => {
+                try {
+                    const ts = mode === 'online' ? serverTimestamp() : Date.now();
+                    const authorName = getCurrentUserName();
+                    const authorTitle = `ID: ${authorName}`;
+
+                    if (action === 'deleteMarker') {
+                        const [id] = args; const marker = markers.find(m => m.id === id);
+                        if (mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markers', id)); else await LocalDB.deleteDoc('markers', id);
+                         if(marker) {
+                            const gridId = getGridIdFromCoords(marker.x, marker.y);
+                            const label = getMarkerLabel(marker);
+                            const mName = getMapName(marker.mapId);
+                            logAction('delete', `刪除: [${gridId}] ${label}`, { action: 'create', collection: 'markers', id: id, data: marker });
+                            addNotification(authorTitle, `${mName}\n刪除標記 ${gridId}[${label}]`);
+                        }
+                        setSelectedMarker(null);
+                        setDraftMarker(null);
+                     } else if (action === 'updateMarker') {
+                        const [id, updates] = args; const oldMarker = markers.find(m => m.id === id); const data = { ...updates, _updated: Date.now() };
+                         if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markers', id), data, { merge: true }); else await LocalDB.setDoc('markers', id, data);
+                        if(oldMarker && oldMarker.published !== false && !updates.published) {
+                             const gridId = getGridIdFromCoords(oldMarker.x, oldMarker.y);
+                             const label = getMarkerLabel(oldMarker);
+                             logAction('update', `更新: [${gridId}] ${label}`, { action: 'update', collection: 'markers', id: id, data: oldMarker });
+                        }
+                    } else if (action === 'saveSegment') {
+                        const segId = `${currentMapId}_${activeCell}`;
+                        const data = { id: segId, mapId: currentMapId, gridId: activeCell, status: 'unlocked', imageUrl: tempImgUrl || null, updatedBy: authorName, updatedAt: Date.now() };
+                         if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'segments', segId), { ...data, updatedAt: ts }, {merge:true}); else await LocalDB.setDoc('segments', segId, data);
+                         setActiveCell(null); setTempImgUrl("");
+                        const mName = getMapName(currentMapId);
+                        logAction('update', `${mName}: 新增${activeCell}地圖圖片`);
+                        addNotification(authorTitle, `${mName}\n新增${activeCell}地圖圖片`);
+                    } else if (action === 'lockSegment') {
+                        const segId = `${currentMapId}_${activeCell}`;
+                        try {
+                            if (mode === 'online') {
+                                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'segments', segId));
+                                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'segments', activeCell));
+                            } else {
+                                await LocalDB.deleteDoc('segments', segId);
+                                await LocalDB.deleteDoc('segments', activeCell);
+                            }
+                            setActiveCell(null); 
+                            setTempImgUrl("");
+                            const mName = getMapName(currentMapId);
+                            addNotification(authorTitle, `${mName}\n區域重置 ${activeCell}`);
+                        } catch (e) {
+                            console.error("Lock segment failed", e);
+                        }
+                    } else if (action === 'saveGroup') {
+                        const id = editingGroup?.id === 'new' ? `group_${Date.now()}` : editingGroup.id;
+                         let pid = groupForm.parentId || null; if (pid === id) pid = null;
+                         let newOrder = 0;
+                        if (Array.isArray(markerGroups) && markerGroups.length > 0) {
+                            const orders = markerGroups.map(g => typeof g.order === 'number' ? g.order : 0);
+                            newOrder = Math.max(...orders, 0) + 1;
+                        }
+                        const order = groupForm.order !== undefined ? groupForm.order : newOrder;
+                        const data = { id, label: groupForm.label || '新分類', color: groupForm.color || '#cccccc', iconUrl: groupForm.iconUrl || '', parentId: pid, order: order };
+                         const oldGroup = markerGroups.find(g => g.id === id);
+                        if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markerGroups', id), data); else await LocalDB.setDoc('markerGroups', id, data);
+                         logAction(oldGroup ? 'update' : 'create', `${oldGroup ? '更新' : '新增'}分類: ${data.label}`, oldGroup ? { action: 'update', collection: 'markerGroups', id: id, data: oldGroup } : { action: 'delete', collection: 'markerGroups', id: id });
+                        setEditingGroup(null);
+                        addNotification(authorTitle, `${oldGroup ? "分類更新" : "分類新增"} ${data.label}`);
+                    } else if (action === 'deleteGroup') {
+                        const [id] = args; const g = markerGroups.find(x => x.id === id);
+                        if (markerGroups.length <= 1) { 
+                            addNotification("提醒", "必須保留至少一個分類標籤"); 
+                            return; 
+                        }
+                         if (mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markerGroups', id)); else await LocalDB.deleteDoc('markerGroups', id);
+                        if(g) {
+                            logAction('delete', `刪除分類: ${g.label}`, { action: 'create', collection: 'markerGroups', id: id, data: g });
+                            addNotification(authorTitle, `分類刪除 ${g.label}`);
+                        }
+                    } else if (action === 'reorderGroups') {
+                         const [newGroups] = args; 
+                         if(mode === 'online') { 
+                             const batch = writeBatch(db); 
+                             newGroups.forEach((g, idx) => batch.update(doc(db, 'artifacts', appId, 'public', 'data', 'markerGroups', g.id), { order: idx })); 
+                             await batch.commit(); 
+                         } else { 
+                             newGroups.forEach((g, idx) => LocalDB.setDoc('markerGroups', g.id, { ...g, order: idx })); 
+                         }
+                    } else if (action === 'resetDefaults') {
+                        if(mode === 'online') await batchWrite('markerGroups', DEFAULT_GROUPS);
+                        else LocalDB.saveData('markerGroups', DEFAULT_GROUPS);
+                        addNotification("系統訊息", "已恢復預設分類列表");
+                    } else if (action === 'createMap') {
+                         const newId = `map_${Date.now()}`; const newMap = { id: newId, name: args[0], order: maps.length };
+                         if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', newId), newMap); else await LocalDB.setDoc('maps', newId, newMap);
+                         setCurrentMapId(newId); logAction('create', `建立地圖: ${args[0]}`); setIsCreateMapModalOpen(false);
+                         addNotification(authorTitle, `地圖建立 ${args[0]}`);
+                    } else if (action === 'deleteMap') {
+                         if (maps.length <= 1) return;
+                         if (mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', args[0])); else await LocalDB.deleteDoc('maps', args[0]);
+                         setCurrentMapId('default'); setMapToDelete(null);
+                         addNotification(authorTitle, "地圖已移除");
+                    } else if (action === 'copyMap') {
+                         const sourceMapId = args[0];
+                         const newName = args[1];
+                         const newMapId = `map_${Date.now()}`;
+                         const newMap = { id: newMapId, name: newName, order: maps.length };
+                         
+                         addNotification("地圖複製", "正在完整複製地圖資料（含影像），請耐心等候...");
+
+                         if (mode === 'online') {
+                             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', newMapId), newMap);
+                         } else {
+                             await LocalDB.setDoc('maps', newMapId, newMap);
+                         }
+
+                         // 複製標記 (Markers)
+                         const markersToClone = markers.filter(m => (m.mapId === sourceMapId) || (!m.mapId && sourceMapId === 'default'));
+                         const clonedMarkers = markersToClone.map((m, i) => ({
+                             ...m,
+                             id: `m_clone_${Date.now()}_${i}_${Math.random().toString(36).substr(2,4)}`,
+                             mapId: newMapId,
+                             createdAt: mode === 'online' ? serverTimestamp() : Date.now()
+                         }));
+
+                         // 複製地圖影像塊 (Segments)
+                         const segmentsToClone = Object.values(segments).filter(s => (s.mapId === sourceMapId) || (!s.mapId && sourceMapId === 'default'));
+                         const clonedSegments = segmentsToClone.map(s => ({
+                             ...s,
+                             id: `${newMapId}_${s.gridId || (s.id.includes('_') ? s.id.split('_').pop() : s.id)}`,
+                             mapId: newMapId,
+                             updatedAt: mode === 'online' ? serverTimestamp() : Date.now()
+                         }));
+
+                         if (mode === 'online') {
+                             if (clonedMarkers.length > 0) await batchWrite('markers', clonedMarkers);
+                             if (clonedSegments.length > 0) await batchWrite('segments', clonedSegments);
+                         } else {
+                             clonedMarkers.forEach(m => LocalDB.setDoc('markers', m.id, m));
+                             clonedSegments.forEach(s => LocalDB.setDoc('segments', s.id, s));
+                         }
+
+                         setCurrentMapId(newMapId); 
+                         setMapToCopy(null);
+                         logAction('create', `複製地圖: ${newName} (源自 ${getMapName(sourceMapId)})`);
+                         addNotification(authorTitle, `地圖完整複製完成：${newName}`);
+                    } else if (action === 'renameMap') {
+                         if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', args[0]), { name: args[1] }, { merge: true }); 
+                         else await LocalDB.setDoc('maps', args[0], { name: args[1] });
+                         setEditingMapId(null);
+                         addNotification(authorTitle, `地圖更名 ${args[1]}`);
+                    } else if (action === 'saveStatus') {
+                         const inputData = args[0] || statusForm;
+                        const id = inputData.id || `status_${Date.now()}`;
+                         const oldStatus = markerStatuses.find(s => s.id === id);
+                        const data = { id, label: inputData.label || '新狀態', color: inputData.color || '#3b82f6', isDefault: !!inputData.isDefault };
+                        if (mode === 'online') {
+                            const batch = writeBatch(db);
+                            const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'markerStatuses');
+                            if (data.isDefault) {
+                                markerStatuses.forEach(s => { if (s.id !== id && s.isDefault) batch.update(doc(collectionRef, s.id), { isDefault: false }); });
+                            }
+                            batch.set(doc(collectionRef, id), data);
+                            await batch.commit();
+                        } else {
+                            let newStatuses = [...markerStatuses];
+                            const existingIdx = newStatuses.findIndex(s => s.id === id);
+                            if (existingIdx >= 0) newStatuses[existingIdx] = data;
+                            else newStatuses.push(data);
+                            if (data.isDefault) newStatuses = newStatuses.map(s => s.id === id ? s : { ...s, isDefault: false });
+                            LocalDB.saveData('markerStatuses', newStatuses);
+                        }
+                        if (!args[0]) setStatusForm({});
+                         addNotification(authorTitle, `${oldStatus ? "更新狀態" : "新增狀態"} ${data.label}${data.isDefault ? ' (預設)' : ''}`);
+                    } else if (action === 'deleteStatus') {
+                         const statusToDelete = markerStatuses.find(s => s.id === args[0]);
+                        if (mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markerStatuses', args[0])); else await LocalDB.deleteDoc('markerStatuses', args[0]);
+                         addNotification(authorTitle, `刪除狀態標籤 ${statusToDelete ? statusToDelete.label : "狀態"}`);
+                    }
+                } catch(e) {
+                     console.error("Action Error", e);
+                    if (e.code === 'invalid-argument' && e.message.includes('exceeds the maximum allowed size')) addNotification("失敗", "影像檔案超過系統限制");
+                    else if (e.code === 'permission-denied') addNotification("拒絕", "您沒有執行此操作的權限");
+                }
+            };
+
+            const handleGroupDragStart = (e, group) => { setDraggedGroup(group); e.dataTransfer.effectAllowed = 'move'; e.target.style.opacity = '0.5'; };
+            const handleGroupDragEnd = (e) => { e.target.style.opacity = '1'; setDraggedGroup(null); };
+            const handleGroupDragOver = (e) => { e.preventDefault(); };
+            const handleGroupDrop = (e, targetGroup) => { e.preventDefault(); if (!draggedGroup || draggedGroup.id === targetGroup.id) return; const copied = [...sortedGroups]; const from = copied.findIndex(g => g.id === draggedGroup.id); const to = copied.findIndex(g => g.id === targetGroup.id); copied.splice(from, 1); copied.splice(to, 0, draggedGroup); handleAction('reorderGroups', copied); };
+            
+            const handleExport = () => { 
+                const data = { markers, segments, markerGroups, markerStatuses, maps, version: '4.0.0', timestamp: new Date().toISOString() }; 
+                const blob = new Blob([JSON.stringify({data})], {type:'application/json'}); 
+                const url = URL.createObjectURL(blob); 
+                const a = document.createElement('a'); 
+                a.href = url; a.download = `TacticalMap_${mode}_${new Date().toISOString().slice(0,10)}.json`; 
+                document.body.appendChild(a); a.click(); document.body.removeChild(a); 
+            };
+
+            const handleImport = (e) => {
+                 const f = e.target.files?.[0]; if(!f) return; const r = new FileReader();
+                 r.onload = async (ev) => {
+                     try {
+                        let json; 
+                        try { 
+                            json = JSON.parse(ev.target.result); 
+                        } catch(err) { 
+                            const parser = new DOMParser(); 
+                            const docText = parser.parseFromString(ev.target.result, 'text/html'); 
+                            const raw = docText.getElementById('raw-data'); 
+                            if(raw) json = JSON.parse(raw.textContent); else throw new Error("無效格式"); 
+                        }
+                        
+                        const root = json.data || json; 
+                        const rawMarkers = Array.isArray(root.markers) ? root.markers : (root.markers ? Object.values(root.markers) : []); 
+                        const mM = rawMarkers.map(m => ({
+                            ...m,
+                            mapId: m.mapId || 'default',
+                            published: true, 
+                            createdAt: m.createdAt || Date.now()
+                        }));
+
+                        const gG = Array.isArray(root.markerGroups) ? root.markerGroups : (Array.isArray(root.groups) ? root.groups : []);
+                        const mP = Array.isArray(root.maps) ? root.maps : [{id:'default', name:'主地圖', order:0}];
+                        const mS = Array.isArray(root.markerStatuses) ? root.markerStatuses : (Array.isArray(root.statuses) ? root.statuses : DEFAULT_STATUSES);
+                        
+                        let segArray = [];
+                        if (root.segments) {
+                            segArray = Array.isArray(root.segments) ? root.segments : Object.values(root.segments);
+                        }
+
+                        const sanitizedGroups = gG.map(g => ({ 
+                            ...g, 
+                            parentId: (g.parentId && g.parentId !== g.id) ? g.parentId : null, 
+                            order: typeof g.order === 'number' ? g.order : 0 
+                        }));
+                        
+                        if (mode === 'online') {
+                            addNotification("數據匯入", "正在以「慢速安全模式」同步數據至雲端，這可能需要幾分鐘，請勿重新整理...");
+                            setMarkers(mM);
+                            setMaps(mP);
+                            setMarkerStatuses(mS);
+                            setMarkerGroups(sanitizedGroups);
+                            setSegments(segArray.reduce((acc, s) => ({...acc, [s.id]: s}), {}));
+
+                            if(mP.length > 0) await batchWrite('maps', mP);
+                            if(mS.length > 0) await batchWrite('markerStatuses', mS);
+                            if(sanitizedGroups.length > 0) await batchWrite('markerGroups', sanitizedGroups);
+                            if(segArray.length > 0) await batchWrite('segments', segArray);
+                            if(mM.length > 0) await batchWrite('markers', mM);
+                        } else {
+                             LocalDB.saveData('markers', mM); 
+                             LocalDB.saveData('segments', segArray); 
+                             LocalDB.saveData('markerGroups', sanitizedGroups);
+                             LocalDB.saveData('maps', mP);
+                             LocalDB.saveData('markerStatuses', mS);
+                             setMarkers(mM);
+                             setMaps(mP);
+                             setMarkerStatuses(mS);
+                             setMarkerGroups(sanitizedGroups);
+                        }
+                        setCurrentMapId('default');
+                        addNotification("系統訊息", "匯入完成！所有數據已成功與雲端對齊。");
+                      } catch(e) { 
+                        console.error(e);
+                        addNotification("匯入失敗", e.message);
+                      } finally { 
+                        setIsImporting(false); 
+                        if(fileInputRef.current) fileInputRef.current.value=''; 
+                      }
+                 }; 
+                 r.readAsText(f);
+             };
+
+            const handleWheel = (e) => { 
+                e.preventDefault(); 
+                const nextScale = Math.min(Math.max(0.43, scale * Math.exp(-e.deltaY * 0.001)), 8); 
+                const rect = e.currentTarget.getBoundingClientRect(); 
+                const ratio = nextScale / scale; 
+                setScale(nextScale); 
+                setOffset({ x: (e.clientX - rect.left - rect.width / 2) - ((e.clientX - rect.left - rect.width / 2) - offset.x) * ratio, y: (e.clientY - rect.top - rect.height / 2) - ((e.clientY - rect.top - rect.height / 2) - offset.y) * ratio }); 
+            };
+            
+            const handleZoom = (dir) => { 
+                const next = dir==='in' ? Math.min(8, scale*1.35) : Math.max(0.43, scale/1.35); 
+                setOffset({x: offset.x * (next/scale), y: offset.y * (next/scale)}); 
+                setScale(next); 
+            };
+
+            const startDrag = (e) => {
+                 if(e.button !== 0 && e.button !== 2 && e.button !== 1) return;
+                isMouseDownRef.current = true;
+                hasDraggedRef.current = false;
+                dragStartPosRef.current = { x: e.clientX, y: e.clientY };
+                setDragStart({x:e.clientX-offset.x, y:e.clientY-offset.y});
+             };
+
+            const onDrag = (e) => {
+                 if(!isMouseDownRef.current) return;
+                const dx = e.clientX - dragStartPosRef.current.x;
+                const dy = e.clientY - dragStartPosRef.current.y;
+                if (Math.hypot(dx, dy) > 5) {
+                    if (!hasDraggedRef.current) {
+                         hasDraggedRef.current = true;
+                         setIsDragging(true);
+                     }
+                    setOffset({x:e.clientX-dragStart.x, y:e.clientY-dragStart.y});
+                 }
+            };
+
+            const stopDrag = () => { isMouseDownRef.current = false; setIsDragging(false); };
+
+            const handleMapContainerClick = async (e) => {
+                if(e.button!==0 || isDragging || interactionMode!=='tactical') return;
+                if(hasDraggedRef.current) return;
+                if (e.target.closest('.cursor-pointer')) return;
+                if(selectedMarker) { handleClosePanel(); setIsDeleteConfirming(false); return; }
+                if(activeCell) return;
+                if(!isEditMode) return;
+
+                const rect = containerRef.current.getBoundingClientRect();
+                const realScale = rect.width / (MAP_SIZE + 2*BORDER_WIDTH);
+                const border = BORDER_WIDTH * realScale;
+                const cx = (e.clientX - rect.left) - border;
+                const cy = (e.clientY - rect.top) - border;
+                const w = rect.width - 2*border; const h = rect.height - 2*border;
+                const x = (cx/w)*100, y = (cy/h)*100;
+                
+                if(x>=0 && x<=100 && y>=0 && y<=100) {
+                    const newId = `m_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+                    const authorName = getCurrentUserName();
+                    const newData = { id: newId, x, y, type: lastUsedGroupId, mapId: currentMapId, size: 16, note: "", image: "", author: authorName, createdAt: Date.now(), published: false, status: markerStatuses.find(s=>s.isDefault)?.id || null };
+                    
+                    setTempSize(16); 
+                    setTempNote(""); 
+                    setTempMarkerImg(""); 
+                    setSelectedGroupId(lastUsedGroupId);
+                    setDraftMarker(newData);
+                    setSelectedMarker(newData);
+
+                    if (mode === 'online') {
+                        setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'markers'), newId), { ...newData, createdAt: serverTimestamp() });
+                    } else {
+                        LocalDB.setDoc('markers', newId, newData);
+                    }
+                 }
+            };
+
+            const handleCellClick = useCallback((e, id) => {
+                if(hasDraggedRef.current) return;
+                if(interactionMode==='map_edit') { e.stopPropagation(); e.preventDefault(); setActiveCell(id); const exist = currentSegments[id]; setTempImgUrl(exist?.imageUrl||""); }
+            }, [hasDraggedRef, interactionMode, currentSegments]);
+
+            const handleMarkerClick = useCallback((e, m) => {
+                if(hasDraggedRef.current) return;
+                if(interactionMode === 'tactical') {
+                     e.stopPropagation(); 
+                     e.preventDefault();
+                     setDraftMarker({...m});
+                     setSelectedMarker(m); 
+                     setTempNote(m.note || ""); 
+                     setTempMarkerImg(m.image || ""); 
+                     setTempSize(m.size || 16); 
+                     setSelectedGroupId(m.type || 'info'); 
+                     setIsDeleteConfirming(false);
+                 }
+            }, [hasDraggedRef, interactionMode]);
+
+            const processImage = (file, size, cb) => { 
+                setIsProcessingImage(true); 
+                const r = new FileReader(); 
+                r.onload = (e) => { 
+                    const img = new Image(); 
+                    img.onload = () => { 
+                        const c = document.createElement('canvas'); 
+                        const ctx = c.getContext('2d'); 
+                        let w=img.width, h=img.height; 
+                        if(w>h) { if(w>size){h*=size/w;w=size;} } else { if(h>size){w*=size/h;h=size;} } 
+                        c.width=w; c.height=h; ctx.drawImage(img,0,0,w,h); 
+                        cb(c.toDataURL(size>128?'image/jpeg':'image/png', 0.7)); 
+                        setIsProcessingImage(false); 
+                    }; 
+                    img.src = e.target.result; 
+                }; 
+                r.readAsDataURL(file); 
+            };
+
+            const renderIcon = useCallback((typeId, size) => { 
+                const s = size || 16; const g = getGroup(typeId); 
+                if(g.iconUrl) return <img src={g.iconUrl} className="object-contain" style={{width:s, height:s}} onError={e=>e.target.style.display='none'}/>; 
+                const I = {danger:Skull, loot:Shield, base:Navigation, info:MessageSquare}[typeId] || MapPin; 
+                return <I size={s} style={{color:g.color}} className="fill-current/20"/>; 
+            }, [getGroup]);
+
+            const toggleGroupExpansion = (id) => { const s = new Set(expandedGroupIds); if (s.has(id)) s.delete(id); else s.add(id); setExpandedGroupIds(s); };
+
+            const renderGroupTreeManage = (groups, parentId = null, level = 0) => {
+                if(level > 10) return null;
+                return groups.filter(g => g.parentId === parentId || (!parentId && !g.parentId)).sort((a,b)=>(a.order||0)-(b.order||0)).map(g => (
+                    <div key={g.id}>
+                        <div draggable onDragStart={(e) => handleGroupDragStart(e, g)} onDragEnd={handleGroupDragEnd} onDragOver={handleGroupDragOver} onDrop={(e) => handleGroupDrop(e, g)} className={`flex items-center justify-between p-2 bg-slate-800/30 border border-slate-800 rounded hover:border-slate-700 draggable-item transition-all mb-1 ${level > 0 ? 'ml-4 border-l-2 border-l-slate-700' : ''}`}>
+                            <div className="flex items-center gap-3">
+                                <div className="cursor-move text-slate-600 hover:text-slate-400"><GripVertical size={12}/></div>
+                                <div className="w-2 h-2 rounded-full shadow-[0_0_5px_currentColor]" style={{backgroundColor:g.color}}></div>
+                                <span className="text-xs font-medium text-slate-300">{g.label}</span>
+                            </div>
+                            {deletingGroupId===g.id ? (<div className="flex gap-1 animate-fadeIn"><button onClick={()=>{handleAction('deleteGroup', g.id);setDeletingGroupId(null);}} className="px-1.5 py-0.5 bg-red-600/20 text-red-400 border border-red-900 rounded text-[10px] hover:bg-red-600 hover:text-white">刪除</button><button onClick={()=>setDeletingGroupId(null)} className="px-1.5 py-0.5 bg-slate-700 text-slate-300 rounded text-[10px]">取消</button></div>) : (<div className="flex gap-1 opacity-60 hover:opacity-100"><button onClick={()=>{setGroupForm({...g});setEditingGroup(g);}} className="p-1 hover:text-white"><Edit2 size={12}/></button><button onClick={()=>setDeletingGroupId(g.id)} className="p-1 hover:text-red-400"><Trash2 size={12}/></button></div>)}
+                        </div>
+                        {renderGroupTreeManage(groups, g.id, level + 1)}
+                    </div>
+                ));
+            };
+
+            const renderDynamicGroupList = (groups) => {
+                return groups.sort((a,b) => (a.order || 0) - (b.order || 0)).map(group => {
+                    const isExpanded = expandedGroupIds.has(group.id);
+                    // 修正：isVisible 需要使用 isGroupVisible 遞迴判斷，主分組關閉時子分組也會顯示為關閉
+                    const isVisible = isGroupVisible(group.id);
+                    const groupMarkers = markers.filter(m => m.type === group.id && (m.mapId === currentMapId || (!m.mapId && currentMapId === 'default')));
+                    const totalCount = groupMarkers.length;
+                    const noteGroups = {}; groupMarkers.forEach(m => { const key = m.note ? m.note.trim() : '(無備註)'; if(!noteGroups[key]) noteGroups[key] = 0; noteGroups[key]++; });
+                    const uniqueNotes = Object.keys(noteGroups).sort();
+                    return (
+                        <div key={group.id} className="mb-2">
+                            <div draggable onDragStart={(e) => handleGroupDragStart(e, group)} onDragEnd={handleGroupDragEnd} onDragOver={handleGroupDragOver} onDrop={(e) => handleGroupDrop(e, group)}
+                                className={`flex items-center justify-between p-2 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 cursor-pointer group transition-colors draggable-item ${!isVisible ? 'opacity-60' : ''}`}
+                            >
+                                <div className="flex items-center gap-2 flex-1 overflow-hidden" onClick={(e)=>{ if(uniqueNotes.length > 0){ toggleGroupExpansion(group.id); } }}>
+                                    <div className="p-1 hover:bg-slate-700 rounded text-slate-400 w-5 flex justify-center">{uniqueNotes.length > 0 && (isExpanded ? <ChevronDown size={12}/> : <ChevronRightIcon size={12}/>)}</div>
+                                    <div className="w-6 h-6 rounded bg-slate-900 flex items-center justify-center border border-slate-700 shadow-sm shrink-0" onClick={(e)=>{e.stopPropagation(); const s=new Set(hiddenGroupIds); if(s.has(group.id)) s.delete(group.id); else s.add(group.id); setHiddenGroupIds(new Set(s)); }}>{renderIcon(group.id,14)}</div>
+                                    <span className={`text-sm font-medium truncate ${!isVisible ?'text-slate-500 line-through':'text-slate-200'}`}>{group.label}</span>
+                                    <span className="text-[10px] text-slate-500 ml-auto bg-slate-900/50 px-1.5 rounded-full border border-slate-700/50">{totalCount}</span>
+                                </div>
+                                <div className={`text-[10px] font-bold ml-2 ${!isVisible ?'text-slate-600':'text-blue-400'}`} onClick={(e)=>{ e.stopPropagation(); const s=new Set(hiddenGroupIds); if(s.has(group.id)) s.delete(group.id); else s.add(group.id); setHiddenGroupIds(new Set(s)); }}>{!isVisible ? <EyeOff size={14} className="text-slate-600"/> : <Eye size={14} className="text-blue-400"/>}</div>
+                            </div>
+                            {isExpanded && uniqueNotes.length > 0 && (
+                                <div className="ml-8 border-l-2 border-slate-800 space-y-1 mt-1">
+                                    {uniqueNotes.map(noteText => {
+                                        const noteKey = `${group.id}::${noteText === '(無備註)' ? '' : noteText}`;
+                                        const isSubVisible = !hiddenNoteKeys.has(noteKey) && isVisible; // 如果父分組不可見，備註篩選也應隱藏
+                                        return (
+                                            <div key={noteText} className={`flex items-center justify-between p-1.5 pl-3 rounded hover:bg-slate-800/50 cursor-pointer ${!isSubVisible ? 'opacity-50' : ''}`} onClick={()=>{ const k = new Set(hiddenNoteKeys); if(k.has(noteKey)) k.delete(noteKey); else k.add(noteKey); setHiddenNoteKeys(new Set(k)); }}>
+                                                <span className="text-xs text-slate-400 truncate flex-1 break-words whitespace-pre-wrap" title={noteText}>{noteText} <span className="text-slate-600 ml-1">({noteGroups[noteText]})</span></span>
+                                                <div>{!isSubVisible ? <EyeOff size={12} className="text-slate-600"/> : <Eye size={12} className="text-slate-500 hover:text-blue-400"/>}</div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    );
+                });
+            };
+
+            const playNotificationSound = () => {
+                try {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain); gain.connect(ctx.destination);
+                    osc.type = 'sine'; osc.frequency.setValueAtTime(880, ctx.currentTime);
+                    gain.gain.setValueAtTime(0, ctx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0.1, ctx.currentTime + 0.01);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2);
+                    osc.start(); osc.stop(ctx.currentTime + 0.2);
+                } catch(e){}
+            };
+
+            if (mode === 'unconfigured') return <WelcomeScreen onStartOffline={() => setMode('offline')} />;
+            if (mode === 'online' && !user) return <LoadingScreen errorMsg={connectionError} onForceOffline={() => setMode('offline')} />;
+
+            return (
+                <ErrorBoundary>
+                    <header className={`flex-shrink-0 border-b border-slate-800 p-2 flex justify-between items-center z-20 shadow-lg ${panelClass}`}>
+                        <div className="flex items-center space-x-3 ml-2"><MapIcon className="text-blue-500 text-xl" /><h1 className="text-xl font-bold tracking-wider text-white hidden md:block">多人協作戰術地圖</h1><span className="text-xs text-slate-500 ml-2 border-l border-slate-700 pl-3">v4.0.0</span></div>
+                        <div className="flex-1 flex items-center justify-start overflow-x-auto no-scrollbar mx-4 px-2 space-x-1">
+                            {maps.map(m => (
+                                <div key={m.id} className={`group relative flex items-center px-3 py-1.5 rounded-t-lg cursor-pointer transition-all border-t border-x ${currentMapId === m.id ? 'bg-slate-900 border-slate-700 text-white z-10' : 'bg-slate-950 border-transparent text-slate-500 hover:text-slate-300'}`} onClick={() => setCurrentMapId(m.id)} onDoubleClick={() => setEditingMapId(m.id)}>
+                                    {editingMapId === m.id ? <input autoFocus className="bg-transparent border-none text-xs font-bold outline-none w-20 text-white" defaultValue={m.name} onBlur={(e) => handleAction('renameMap', m.id, e.target.value)} onKeyDown={(e) => { if(e.key==='Enter') handleAction('renameMap', m.id, e.currentTarget.value) }} /> : <span className="text-xs font-bold whitespace-nowrap">{m.name}</span>}
+                                    <div className={`ml-2 flex items-center gap-1 ${currentMapId === m.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                                        <button onClick={(e) => { e.stopPropagation(); setMapToCopy(m); setCopyMapNameInput(m.name + " (副本)"); }} className="p-0.5 hover:text-blue-400 rounded"><Copy size={10}/></button>
+                                        <button onClick={(e) => { e.stopPropagation(); if(maps.length > 1) setMapToDelete(m); }} className="p-0.5 hover:text-red-400 rounded"><X size={10}/></button>
+                                    </div>
+                                </div>
+                            ))}
+                            <button onClick={() => setIsCreateMapModalOpen(true)} className="p-1.5 rounded bg-slate-800 text-slate-400 hover:text-white border border-slate-700 ml-1"><Plus size={14} /></button>
+                        </div>
+                        <div className="flex items-center space-x-3 mr-2">
+                            <div onClick={toggleSound} className={`cursor-pointer flex items-center justify-center p-2 rounded hover:bg-slate-700 transition-colors mr-2 border border-slate-700 ${soundEnabled ? 'text-green-400 border-green-900/30 bg-green-900/10' : 'text-slate-500'}`}>{soundEnabled ? <Volume2 size={16}/> : <VolumeX size={16}/>}</div>
+                            <div className="relative group">
+                                <div className="flex items-center space-x-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded cursor-default hover:bg-slate-750 transition-colors">
+                                    {mode === 'online' ? <Wifi size={14} className="text-emerald-400"/> : <WifiOff size={14} className="text-slate-400"/>}
+                                    <span className={`text-xs font-bold ${mode==='online'?'text-emerald-400':'text-slate-400'}`}>{mode==='online'?'連線中':'離線模式'}</span>
+                                    {mode === 'online' && activeUsersList.length > 0 && (
+                                        <span className="ml-1 bg-emerald-900/50 text-emerald-400 text-[10px] px-1.5 rounded-full border border-emerald-900/50">{activeUsersList.length}</span>
+                                    )}
+                                </div>
+                                {mode === 'online' && (
+                                    <div className="absolute top-full right-0 mt-2 w-48 bg-slate-900 border border-slate-700 rounded shadow-xl p-2 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200">
+                                        <div className="text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest border-b border-slate-800 pb-1 flex items-center justify-between">
+                                            <span>在線人員 (2m)</span>
+                                            <Users size={12} />
+                                        </div>
+                                        {activeUsersList.length === 0 ? <div className="text-xs text-slate-500 p-2 text-center">無其他人員</div> : (
+                                            <div className="space-y-1 max-h-40 overflow-y-auto">
+                                                {activeUsersList.map((u, i) => (
+                                                    <div key={i} className="flex items-center gap-2 p-1 rounded hover:bg-slate-800">
+                                                        <div className={`w-2 h-2 rounded-full ${u.isSelf ? 'bg-blue-500 shadow-[0_0_5px_#3b82f6]' : 'bg-emerald-500'}`}></div>
+                                                        <span className={`text-xs font-mono truncate ${u.isSelf ? 'text-blue-400 font-bold' : 'text-white'}`}>{u.name}</span>
+                                                        {u.isSelf && <span className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded border border-blue-900/50 font-bold ml-auto">我</span>}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <div className="mt-2 text-[9px] text-slate-600 text-center border-t border-slate-800 pt-1">系統每分鐘自動更新狀態</div>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => setIsEditingName(true)}>
+                                <span className={`w-2 h-2 rounded-full mr-2 ${mode==='online'?'bg-green-500 animate-pulse':'bg-slate-500'}`}></span>
+                                {isEditingName ? (<input className="bg-transparent border-b border-blue-500 text-xs font-mono text-white w-20 focus:outline-none" autoFocus defaultValue={customName || (user ? user.uid.slice(0,4) : '....')} onBlur={(e) => { const val = e.target.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); }} onKeyDown={(e) => { if(e.key === 'Enter') { const val = e.currentTarget.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); } }} />) : (<span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">OP: {customName || (user ? user.uid.slice(0,4) : '....')}</span>)}
+                            </div>
+                        </div>
+                    </header>
+                    <div className="flex flex-1 overflow-hidden z-10 relative">
+                        <aside className={`bg-slate-900 border-r border-slate-800 flex flex-col transition-all duration-300 ${isSidebarOpen?'w-72':'w-0 overflow-hidden'} ${panelClass}`}>
+                            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50"><h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center"><Layers size={14} className="mr-2"/> 控制面板</h2><button onClick={()=>setIsSidebarOpen(false)} className="text-slate-500 hover:text-white"><ChevronLeft size={16}/></button></div>
+                            <div className="p-4 pb-2"><div className="flex bg-slate-950 p-1 rounded border border-slate-700/50"><button onClick={()=>setInteractionMode('tactical')} className={`flex-1 py-1.5 rounded text-xs font-bold flex items-center justify-center gap-2 transition-all ${interactionMode==='tactical'?'bg-blue-600 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Crosshair size={14}/> 戰術模式</button><button onClick={()=>setInteractionMode('map_edit')} className={`flex-1 py-1.5 rounded text-xs font-bold flex items-center justify-center gap-2 transition-all ${interactionMode==='map_edit'?'bg-indigo-600 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Grid size={14}/> 編輯地圖</button></div></div>
+                            <div className="flex border-b border-slate-800 mt-2"><button onClick={()=>setSidebarTab('filter')} className={`flex-1 py-3 text-xs font-bold uppercase border-b-2 transition-colors ${sidebarTab==='filter'?'border-blue-500 text-blue-400 bg-slate-800/50':'border-transparent text-slate-500 hover:text-slate-300'}`}>篩選</button><button onClick={()=>setSidebarTab('manage')} className={`flex-1 py-3 text-xs font-bold uppercase border-b-2 transition-colors ${sidebarTab==='manage'?'border-blue-500 text-blue-400 bg-slate-800/50':'border-transparent text-slate-500 hover:text-slate-300'}`}>管理</button><button onClick={()=>setSidebarTab('logs')} className={`flex-1 py-3 text-xs font-bold uppercase border-b-2 transition-colors ${sidebarTab==='logs'?'border-blue-500 text-blue-400 bg-slate-800/50':'border-transparent text-slate-500 hover:text-slate-300'}`}>紀錄</button></div>
+                            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-900/20">
+                                {sidebarTab==='filter' && <div className="space-y-1">
+                                    <div className="flex justify-between items-center mb-2 pl-1 bg-slate-900/50 p-2 rounded border border-slate-800">
+                                        <p className="text-[10px] text-slate-500 uppercase tracking-widest">系統權限</p>
+                                        <div onClick={() => setIsEditMode(!isEditMode)} className="flex items-center gap-2 cursor-pointer">
+                                            <span className={`text-[10px] font-bold ${isEditMode ? 'text-emerald-400' : 'text-slate-500'}`}>{isEditMode ? '編輯模式' : '唯讀模式'}</span>
+                                            <div className={`w-8 h-4 rounded-full relative transition-colors ${isEditMode ? 'bg-emerald-600' : 'bg-slate-700'}`}>
+                                                <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${isEditMode ? 'left-4' : 'left-0.5'}`}></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 pl-1">圖層列表 (可拖曳)</p>
+                                    {renderDynamicGroupList(markerGroups)}
+                                </div>}
+                                {sidebarTab==='manage' && <div className="space-y-6 animate-fadeIn">
+                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3"><div className="flex items-center gap-2 mb-3 text-slate-300 text-xs font-bold uppercase tracking-wider"><Database size={14} className="text-emerald-400"/> 數據備份</div><div className="grid grid-cols-2 gap-2"><button onClick={handleExport} className="py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><Download size={12}/> 導出</button><div className="relative"><input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" /><button className="w-full h-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><FileUp size={12}/> 導入</button></div></div></div>
+                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3">
+                                        <div className="flex items-center justify-between mb-3"><div className="flex items-center gap-2 text-slate-300 text-xs font-bold uppercase tracking-wider"><Tag size={14} className="text-blue-400"/> 狀態標籤</div><button onClick={()=>setStatusForm({label:'', color:'#3b82f6', isDefault: false})} className="p-1 rounded bg-blue-900/30 text-blue-400 hover:bg-blue-900/50"><Plus size={12}/></button></div>
+                                        <div className="space-y-1">{markerStatuses.map(s=>(
+                                            <div key={s.id} className="flex items-center justify-between p-2 bg-slate-900 rounded text-xs border border-slate-800">
+                                                <div className="flex items-center gap-3">
+                                                    <button onClick={()=>handleAction('saveStatus', {...s, isDefault: !s.isDefault})} className={`hover:scale-110 transition-transform ${s.isDefault ? 'text-yellow-400' : 'text-slate-600 hover:text-yellow-400'}`} title={s.isDefault ? "取消預設" : "設為預設"}><Star size={12} fill={s.isDefault ? "currentColor" : "none"} /></button>
+                                                    <div className="w-3 h-3 rounded-full shadow-[0_0_5px_currentColor]" style={{backgroundColor:s.color}}></div>
+                                                    <span className="text-slate-300">{s.label}</span>
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <button onClick={()=>setStatusForm({...s})} className="text-slate-600 hover:text-white" title="編輯"><Edit2 size={12}/></button>
+                                                    <button onClick={()=>handleAction('deleteStatus', s.id)} className="text-slate-600 hover:text-red-400" title="刪除"><X size={12}/></button>
+                                                </div>
+                                            </div>
+                                        ))}</div>
+                                        {statusForm.label !== undefined && <div className="mt-2 p-2 border-t border-slate-700"><input type="text" placeholder="名稱" className="w-full bg-slate-950 border border-slate-700 p-1.5 text-xs mb-2 rounded text-white focus:border-blue-500 outline-none" value={statusForm.label} onChange={e=>setStatusForm({...statusForm, label:e.target.value})} /><div className="flex gap-2"><input type="color" className="flex-1 h-6 rounded cursor-pointer bg-transparent border-none" value={statusForm.color} onChange={e=>setStatusForm({...statusForm, color:e.target.value})} /><button onClick={()=>handleAction('saveStatus')} className="bg-blue-600 hover:bg-blue-500 text-white px-3 rounded text-[10px] font-bold">儲存</button></div></div>}
+                                    </div>
+                                    <div><div className="flex justify-between items-center mb-2"><p className="text-[10px] text-slate-500 uppercase tracking-widest">標記分類 (可拖曳)</p><button onClick={()=>{handleAction('resetDefaults');}} className="text-blue-400 hover:text-blue-300 text-[10px] font-bold flex items-center gap-1 border border-blue-900/50 px-2 py-1 rounded bg-blue-900/20 hover:bg-blue-900/40"><RefreshCcw size={10}/> 恢復預設</button><button onClick={()=>{setGroupForm({label:'',color:'#3b82f6',iconUrl:'', parentId: ''});setEditingGroup({id:'new'});}} className="text-blue-400 hover:text-blue-300 text-[10px] font-bold flex items-center gap-1"><Plus size={10}/> 新增分類</button></div><div className="space-y-2">{renderGroupTreeManage(sortedGroups)}</div></div>
+                                </div>}
+                                {sidebarTab==='logs' && (
+                                    <div className="space-y-3 animate-fadeIn flex flex-col h-full">
+                                        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 pl-1">最近操作紀錄</p>
+                                        <div className="flex-1 overflow-y-auto space-y-3">
+                                            {actionLogs.length === 0 ? <div className="text-center text-slate-600 text-xs py-4">尚無紀錄</div> :
+                                                actionLogs.slice((logPage - 1) * LOGS_PER_PAGE, logPage * LOGS_PER_PAGE).map(log => (
+                                                    <div key={log.id} className={`border rounded p-2 text-xs flex justify-between items-start group ${log.type==='create'?'border-green-500/30 bg-green-500/10':log.type==='delete'?'border-red-500/30 bg-red-500/10':'border-blue-500/30 bg-blue-500/5'}`}>
+                                                        <div>
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <span className="bg-slate-900/50 text-slate-400 px-1 rounded text-[10px] font-mono">{formatTime(log.timestamp)}</span>
+                                                                <span className={`font-bold ${log.type==='create'?'text-green-400':log.type==='delete'?'text-red-400':'text-blue-400'}`}>{log.user}</span>
+                                                            </div>
+                                                            <div className="text-slate-300">{log.desc}</div>
+                                                        </div>
+                                                        {log.undo && (<button onClick={()=>handleUndo(log)} className="text-slate-500 hover:text-white transition-colors p-1" title="還原此操作"><RotateCcw size={14}/></button>)}
+                                                    </div>
+                                                ))
+                                            }
+                                        </div>
+                                        {actionLogs.length > LOGS_PER_PAGE && (
+                                            <div className="pt-2 mt-2 border-t border-slate-800 flex items-center justify-center gap-1 flex-wrap">
+                                                <button onClick={() => setLogPage(p => Math.max(1, p - 1))} disabled={logPage === 1} className="p-1.5 rounded bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"><ChevronLeft size={12}/></button>
+                                                {Array.from({length: Math.ceil(actionLogs.length / LOGS_PER_PAGE)}, (_, i) => i + 1).map(p => (
+                                                    <button key={p} onClick={() => setLogPage(p)} className={`w-6 h-6 flex items-center justify-center rounded text-[10px] font-bold transition-all ${logPage === p ? 'bg-blue-600 text-white shadow-lg scale-110' : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'}`}>{p}</button>
+                                                ))}
+                                                <button onClick={() => setLogPage(p => Math.min(Math.ceil(actionLogs.length / LOGS_PER_PAGE), p + 1))} disabled={logPage === Math.ceil(actionLogs.length / LOGS_PER_PAGE)} className="p-1.5 rounded bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"><ChevronRightIcon size={12}/></button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </aside>
+                        {!isSidebarOpen && <div className="absolute top-4 left-4 z-30"><button onClick={()=>setIsSidebarOpen(true)} className="p-2 bg-slate-800 border border-slate-700 text-white rounded shadow-lg hover:bg-slate-700"><Menu size={20}/></button></div>}
+                        <main className={`flex-1 relative bg-black overflow-hidden ${interactionMode==='tactical' && isEditMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`} onMouseDown={startDrag} onMouseMove={onDrag} onMouseUp={stopDrag} onMouseLeave={stopDrag} onWheel={handleWheel} onContextMenu={e=>e.preventDefault()} onClick={handleMapContainerClick}>
+                            <div className={`absolute origin-center ${isDragging ? 'will-change-transform' : 'transition-transform duration-75 ease-out'}`} style={{transform:`translate(${offset.x}px,${offset.y}px) scale(${scale})`, width:'2000px', height:'2000px', top:'calc(50% - 1000px)', left:'calc(50% - 1000px)'}}>
+                                <div ref={containerRef} className={`w-full h-full grid grid-cols-16 grid-rows-16 border-2 border-slate-800 bg-[#020617] relative shadow-2xl tactical-grid`}>
+                                    {gridIds.map(id => (
+                                        <MapGridCell key={id} id={id} segment={currentSegments[id]} interactionMode={interactionMode} onClick={handleCellClick} />
+                                    ))}
+                                    {currentMarkers.map(m => {
+                                        const displayM = (draftMarker && draftMarker.id === m.id) ? draftMarker : m;
+                                        if (!isMarkerVisible(displayM)) return null;
+                                        return (
+                                            <MapMarker 
+                                                key={displayM.id} marker={displayM} scale={scale} isDragging={isDragging} 
+                                                onClick={handleMarkerClick} renderIcon={renderIcon} getGroup={getGroup} 
+                                                getStatus={getStatus} markerClass={markerClass} 
+                                            />
+                                        );
+                                    })}
+                                    {selectedMarker && draftMarker && <div className="absolute pointer-events-none z-[70]" style={{left:`${(draftMarker || selectedMarker).x}%`, top:`${(draftMarker || selectedMarker).y}%`, transform:`translate(-50%,-50%) scale(${1/scale})`}}><div className="w-1.5 h-1.5 bg-white rounded-full absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 shadow-[0_0_10px_white]"/><div className="w-8 h-8 border border-emerald-500 rounded-full animate-ping opacity-50"/></div>}
+                                </div>
+                            </div>
+                            <div className="absolute bottom-6 right-6 flex flex-col space-y-3 z-20"><button onClick={()=>{setScale(1);setOffset({x:0,y:0});}} className="p-3 bg-slate-800/90 hover:bg-blue-600 text-white rounded-lg shadow-lg border border-slate-600 backdrop-blur transition-all group"><Maximize size={20} className="group-hover:scale-110 transition-transform"/></button><div className="bg-slate-800/90 rounded-lg shadow-lg border border-slate-600 flex flex-col backdrop-blur overflow-hidden"><button onClick={()=>handleZoom('in')} className="p-3 hover:bg-slate-700 text-white border-b border-slate-600"><Plus size={20}/></button><button onClick={()=>handleZoom('out')} className="p-3 hover:bg-slate-700 text-white"><Minus size={20}/></button></div></div>
+                            <NotificationToast notifications={notifications} />
+                        </main>
+
+                        {selectedMarker && draftMarker && (
+                            <aside className={`absolute right-0 top-0 h-full w-80 bg-slate-900/95 border-l border-slate-800 flex flex-col shadow-2xl z-[110] backdrop-blur animate-slideInRight ${panelClass}`}>
+                                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50"><h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2"><Search size={16} className="text-blue-400"/> 標記情報 {!isEditMode && <span className="text-[10px] text-amber-500 font-normal ml-2 tracking-widest">(唯讀)</span>}</h2><button onClick={handleClosePanel} className="text-slate-500 hover:text-white"><X size={18}/></button></div>
+                                <div className={`flex-1 overflow-y-auto p-4 space-y-5 ${!isEditMode?'pointer-events-none opacity-80':''}`}>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">標記狀態</label><div className="flex flex-wrap gap-2">{markerStatuses.map(s=>(<button key={s.id} onClick={()=>{setDraftMarker({...draftMarker, status: s.id});}} className={`px-2 py-1 rounded-full text-[10px] font-bold transition-all border ${draftMarker.status===s.id ? 'text-white' : 'bg-slate-900 border-slate-700 text-slate-400'}`} style={draftMarker.status===s.id ? {backgroundColor:s.color, borderColor:s.color} : {}}>{s.label}</button>))}</div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">標記類型</label><div className="space-y-3">{sortedGroups.filter(g => !g.parentId).map(parent => { const children = sortedGroups.filter(g => g.parentId === parent.id); return (<div key={parent.id} className="bg-slate-800/30 rounded border border-slate-800 p-2"><div className="mb-2"><button onClick={()=>{setSelectedGroupId(parent.id);setLastUsedGroupId(parent.id);setDraftMarker({...draftMarker, type: parent.id});}} className={`w-full flex items-center gap-2 p-1.5 rounded transition-all ${draftMarker.type===parent.id ? 'bg-blue-600/20 border border-blue-500/50' : 'hover:bg-slate-700/50'}`}><div className="w-5 h-5 flex items-center justify-center bg-slate-900 rounded border border-slate-700">{renderIcon(parent.id, 14)}</div><span className="text-xs font-bold text-slate-300">{parent.label}</span></button></div>{children.length > 0 && (<div className="grid grid-cols-3 gap-2 pl-2 border-l-2 border-slate-700/50">{children.map(child => (<button key={child.id} onClick={()=>{setSelectedGroupId(child.id);setLastUsedGroupId(child.id);setDraftMarker({...draftMarker, type: child.id});}} className={`flex flex-col items-center justify-center p-1.5 rounded transition-all border ${draftMarker.type===child.id ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'}`}><div className="mb-1">{renderIcon(child.id, 16)}</div><span className="text-[10px] scale-90 truncate w-full text-center">{child.label}</span></button>))}</div>)}</div>); })}</div></div>
+                                    <div><div className="flex justify-between text-[10px] text-slate-400 mb-2 font-bold uppercase tracking-widest"><span>圖示大小</span><span className="text-blue-400 font-mono">{tempSize}px</span></div><input type="range" min="16" max="64" value={tempSize} onChange={e=>{const s=Number(e.target.value);setTempSize(s);setDraftMarker({...draftMarker, size: s});}} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/></div>
+                                    {historyNotes.length > 0 && (<div className="mb-1"><div className="relative"><select className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-xs text-slate-300 focus:border-blue-500 focus:outline-none appearance-none cursor-pointer" onChange={(e) => {if(e.target.value) {setTempNote(e.target.value);setDraftMarker({...draftMarker, note: e.target.value});}}} value=""><option value="" className="text-slate-500">▼ 快速選擇歷史備註 ({historyNotes.length})</option>{historyNotes.map((n, i) => (<option key={i} value={n} className="text-white bg-slate-900">{n}</option>))}</select><div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400"><History size={12} /></div></div></div>)}
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">戰術備註</label><textarea value={tempNote} onChange={e=>{setTempNote(e.target.value);setDraftMarker({...draftMarker, note: e.target.value});}} placeholder="輸入詳細情報..." className="w-full h-24 bg-slate-950 border border-slate-700 rounded p-3 text-sm text-white focus:border-blue-500 focus:outline-none resize-none shadow-inner" /><div className="text-[10px] text-slate-500 text-right mt-1">* 關閉面板以儲存</div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">現場影像</label><div className="relative group"><input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0]) processImage(e.target.files[0],800, (url) => {setTempMarkerImg(url);setDraftMarker({...draftMarker, image: url});})}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/><div className={`flex items-center justify-center w-full py-3 bg-slate-800 border border-dashed rounded hover:bg-slate-750 transition-colors cursor-pointer ${tempMarkerImg ? 'border-blue-500/50' : 'border-slate-700'}`}><Camera size={14} className={`mr-2 ${tempMarkerImg ? 'text-blue-400' : 'text-slate-400'}`}/> <span className={`text-xs ${tempMarkerImg ? 'text-blue-300' : 'text-slate-400'}`}>{tempMarkerImg ? '更換圖片' : '上傳照片'}</span></div></div>{tempMarkerImg && (<div className="mt-3 relative group rounded overflow-hidden border border-slate-700 cursor-zoom-in shadow-lg" onClick={() => { setLightboxImg(tempMarkerImg); setLightboxScale(1); }}><img src={tempMarkerImg} className="w-full h-48 object-cover hover:scale-105 transition-transform duration-500" /><div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity"><ZoomIn className="text-white drop-shadow-md" size={24} /></div><button onClick={(e)=>{e.stopPropagation();setTempMarkerImg("");setDraftMarker({...draftMarker, image: ""});}} className="absolute top-2 right-2 bg-red-600/90 p-1.5 rounded-full text-white hover:bg-red-500 opacity-0 group-hover:opacity-100 transition-all shadow-lg hover:scale-110"><Trash2 size={14}/></button></div>)}</div>
+                                </div>
+                                <div className="p-4 border-t border-slate-800 bg-slate-900 mt-auto"><div className="flex justify-between items-center">{isDeleteConfirming ? (<div className="flex gap-2 flex-1 animate-fadeIn"><button onClick={()=>{handleAction('deleteMarker',selectedMarker.id);setIsDeleteConfirming(false);}} className="flex-1 bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-2 rounded">是, 刪除</button><button onClick={()=>setIsDeleteConfirming(false)} className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold py-2 rounded">取消</button></div>) : (<button onClick={()=>setIsDeleteConfirming(true)} className="text-red-400 hover:text-white hover:bg-red-900/30 px-3 py-2 rounded transition-colors text-xs flex items-center gap-2 border border-transparent hover:border-red-900/50 w-full justify-center"><Trash2 size={14}/> 刪除標記</button>)}</div></div>
+                            </aside>
+                        )}
+                    </div>
+                    {activeCell && (
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[150] flex items-center justify-center p-4 animate-fadeIn">
+                            <div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl">
+                                <h3 className="text-lg font-bold text-white mb-4 uppercase tracking-wide border-b border-slate-800 pb-4 flex items-center justify-between">
+                                    <span>編輯區域 {activeCell}</span>
+                                    <span className="text-[10px] text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">{getMapName(currentMapId)}</span>
+                                </h3>
+                                <div className="mb-6">
+                                     <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">區域地圖影像</label>
+                                     <div className="relative group">
+                                         <input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0]) processImage(e.target.files[0], 800, (url) => setTempImgUrl(url))}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
+                                         <div className={`flex flex-col items-center justify-center w-full h-48 bg-slate-950 border border-dashed rounded-lg hover:bg-slate-900 transition-colors cursor-pointer overflow-hidden ${tempImgUrl ? 'border-blue-500/50' : 'border-slate-700'}`}>
+                                             {tempImgUrl ? (
+                                                 <div className="relative w-full h-full group-hover:opacity-50 transition-opacity">
+                                                     <img src={tempImgUrl} className="w-full h-full object-cover" />
+                                                     <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100"><span className="bg-black/50 text-white text-xs px-2 py-1 rounded">點擊更換</span></div>
+                                                 </div>
+                                             ) : (
+                                                 <div className="flex flex-col items-center text-slate-500">
+                                                     <ImageIcon size={32} className="mb-2 opacity-50"/>
+                                                     <span className="text-xs font-bold">點擊上傳圖片</span>
+                                                     <span className="text-[10px] opacity-70 mt-1">建議比例 1:1</span>
+                                                 </div>
+                                             )}
+                                         </div>
+                                      </div>
+                                </div>
+                                <div className="flex justify-between items-center pt-2">
+                                    <button onClick={() => handleAction('lockSegment')} className="px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded text-xs font-bold flex items-center gap-1 border border-transparent hover:border-red-900/30"><Trash2 size={12}/> 重置/鎖定</button>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => { setActiveCell(null); setTempImgUrl(""); }} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold transition-colors">取消</button>
+                                        <button onClick={() => handleAction('saveSegment')} disabled={!tempImgUrl} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded font-bold text-xs shadow-lg transition-all flex items-center gap-1"><Check size={12}/> 儲存顯示</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {isCreateMapModalOpen && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 border-b border-slate-800 pb-4 uppercase tracking-wide">建立戰區地圖</h3><input type="text" value={newMapName} onChange={e=>setNewMapName(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none mb-6 font-bold" placeholder="地圖名稱..." autoFocus /><div className="flex justify-end gap-3"><button onClick={()=>setIsCreateMapModalOpen(false)} className="px-4 py-2 text-slate-400 text-xs font-bold uppercase">取消</button><button onClick={()=>handleAction('createMap', newMapName)} disabled={!newMapName.trim()} className="px-6 py-2 bg-blue-600 text-white rounded font-bold text-xs uppercase shadow-lg">建立</button></div></div></div>}
+                    {mapToDelete && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-red-900/50 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-4 uppercase tracking-wide border-red-900/30 pb-4 flex items-center"><AlertTriangle className="text-red-500 mr-2" size={20}/> 刪除地圖確認</h3><p className="text-slate-300 text-sm mb-6 leading-relaxed">確定要永久刪除地圖 <span className="text-white font-bold">"{mapToDelete.name}"</span> 嗎？</p><div className="flex justify-end gap-3"><button onClick={() => setMapToDelete(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={() => handleAction('deleteMap', mapToDelete.id)} className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded font-bold shadow-lg text-xs tracking-wide">確認刪除</button></div></div></div>}
+                    {mapToCopy && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 uppercase tracking-wide border-b border-slate-800 pb-4">複製地圖</h3><input type="text" autoFocus value={copyMapNameInput} onChange={e=>setCopyMapNameInput(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none placeholder-slate-600 font-bold mb-6" /><div className="flex justify-end gap-3"><button onClick={() => setMapToCopy(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={() => handleAction('copyMap', mapToCopy.id, copyMapNameInput)} disabled={!copyMapNameInput.trim()} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold shadow-lg text-xs tracking-wide">複製</button></div></div></div>}
+                    {editingGroup && (
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn">
+                            <div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl">
+                                <h3 className="text-lg font-bold text-white mb-6 uppercase tracking-wide border-b border-slate-800 pb-4">{editingGroup.id==='new'?'新增分類':'編輯分類'}</h3>
+                                <div className="space-y-5">
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">分類名稱</label><input type="text" value={groupForm.label||''} onChange={e=>setGroupForm({...groupForm,label:e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none font-bold"/></div>
+                                    <div className="flex gap-4"><div className="flex-1"><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">代表顏色</label><div className="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded p-1"><input type="color" value={groupForm.color||'#ffffff'} onChange={e=>setGroupForm({...groupForm,color:e.target.value})} className="h-8 w-8 rounded cursor-pointer bg-transparent border-none"/><span className="text-xs font-mono text-slate-400 uppercase">{groupForm.color}</span></div></div><div className="flex-1 flex flex-col"><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">預覽</label><div className="flex-1 flex items-center justify-center border border-slate-700 bg-slate-950 rounded relative">{isProcessingImage?<RefreshCw size={20} className="animate-spin text-blue-500"/>:groupForm.iconUrl?<img src={groupForm.iconUrl} className="w-8 h-8 object-contain"/>:<MapPin size={28} style={{color:groupForm.color}} className="fill-current/20"/>}</div></div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">自訂圖示 (選填)</label><div className="relative group"><input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0])processImage(e.target.files[0],64,(url)=>setGroupForm({...groupForm,iconUrl:url}))}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/><div className="flex items-center justify-center w-full py-3 bg-slate-800 border border-slate-700 border-dashed rounded hover:bg-slate-750 hover:border-blue-500 transition-colors text-xs text-slate-400 group-hover:text-blue-400"><ImageIcon size={14} className="mr-2"/> 上傳圖示 (自動縮放)</div></div>{groupForm.iconUrl&&<div className="flex justify-end mt-1"><button onClick={()=>setGroupForm({...groupForm,iconUrl:''})} className="text-[10px] text-red-400 hover:text-red-300 underline">移除圖示</button></div>}</div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">父分類 (選填)</label><div className="relative"><select value={groupForm.parentId || ''} onChange={e=>setGroupForm({...groupForm, parentId: e.target.value || null})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none appearance-none cursor-pointer"><option value="">無 (設為頂層分類)</option>{sortedGroups.filter(g => !g.parentId && g.id !== editingGroup.id).map(g => (<option key={g.id} value={g.id}>{g.label}</option>))}</select><div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500"><ChevronDown size={14}/></div></div></div>
+                                </div>
+                                <div className="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-800"><button onClick={()=>setEditingGroup(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={()=>handleAction('saveGroup')} disabled={!groupForm.label||isProcessingImage} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded font-bold shadow-lg text-xs tracking-wide">儲存設定</button></div>
+                            </div>
+                        </div>
+                    )}
+                </ErrorBoundary>
+            );
+        }
+        const root = createRoot(document.getElementById('root'));
+        root.render(React.createElement(TacticalMap));
+    </script>
+</body>
+</html>
