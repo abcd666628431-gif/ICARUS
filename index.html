@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>戰術指揮中心 v4.0.1 (Multi-Map Upgrade)</title>
+    <title>戰術指揮中心 v4.0.0 (Multi-Map Upgrade)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -90,14 +90,15 @@
             } catch (e) {} 
         }
 
-        const firebaseConfig = {
-  apiKey: "AIzaSyDcH7BFp9xghWLdgvsLseo3XyJG_opf9A8",
-  authDomain: "icarus2-50e01.firebaseapp.com",
-  projectId: "icarus2-50e01",
-  storageBucket: "icarus2-50e01.firebasestorage.app",
-  messagingSenderId: "67456823",
-  appId: "1:67456823:web:9b90f0c93d3cd1c7a394b2"
-};
+        // --- 更新為您提供的新 Firebase 配置 ---
+        const manualConfig = { 
+            apiKey: "AIzaSyDcH7BFp9xghWLdgvsLseo3XyJG_opf9A8",
+            authDomain: "icarus2-50e01.firebaseapp.com",
+            projectId: "icarus2-50e01",
+            storageBucket: "icarus2-50e01.firebasestorage.app",
+            messagingSenderId: "67456823",
+            appId: "1:67456823:web:9b90f0c93d3cd1c7a394b2"
+        };
 
         if (!isConfigured && manualConfig.apiKey) { 
             firebaseConfig = manualConfig; 
