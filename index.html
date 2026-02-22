@@ -82,30 +82,26 @@
         let app, auth, db; 
         let isConfigured = false;
 
+        // 優先讀取環境提供的 Config
         if (typeof window.__firebase_config !== 'undefined') { 
             try { 
                 firebaseConfig = JSON.parse(window.__firebase_config); 
                 if (typeof window.__app_id !== 'undefined') appId = window.__app_id; 
                 isConfigured = true; 
             } catch (e) {} 
-        } else if (typeof __firebase_config !== 'undefined') { 
-            try { 
-                firebaseConfig = JSON.parse(__firebase_config); 
-                if (typeof __app_id !== 'undefined') appId = __app_id; 
-                isConfigured = true; 
-            } catch (e) {} 
         }
 
+        // --- 100% 還原您原本的金鑰設定 ---
         const manualConfig = { 
             apiKey: "AIzaSyBE_zihRCqVCXks-v_rRKmVYlx7hKkVY9I",
-  authDomain: "icarus-3a27d.firebaseapp.com",
-  projectId: "icarus-3a27d",
-  storageBucket: "icarus-3a27d.firebasestorage.app",
-  messagingSenderId: "590060338271",
-  appId: "1:590060338271:web:de1dd106310de80741afea"
-};
+            authDomain: "icarus-3a27d.firebaseapp.com",
+            projectId: "icarus-3a27d",
+            storageBucket: "icarus-3a27d.firebasestorage.app",
+            messagingSenderId: "590060338271",
+            appId: "1:590060338271:web:de1dd106310de80741afea"
+        };
 
-        if (!isConfigured && manualConfig.apiKey && manualConfig.apiKey.length > 5) { 
+        if (!isConfigured && manualConfig.apiKey) { 
             firebaseConfig = manualConfig; 
             isConfigured = true; 
         }
@@ -525,15 +521,27 @@
             useEffect(() => {
                  if (mode === 'offline') setUser({ uid: 'local_cmd' });
                  else if (mode === 'online' && auth) {
-                    const init = async () => { try { if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) await signInWithCustomToken(auth, window.__initial_auth_token); else await signInAnonymously(auth); } catch (e) { setConnectionError(e.message); } };
-                    init(); return onAuthStateChanged(auth, u => { if (u) { setUser(u); setConnectionError(null); } }, (e) => setConnectionError(e.message));
+                    const init = async () => { 
+                        try { 
+                            if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) 
+                                await signInWithCustomToken(auth, window.__initial_auth_token); 
+                            else 
+                                await signInAnonymously(auth); 
+                        } catch (e) { 
+                            setConnectionError(e.message); 
+                        } 
+                    };
+                    init(); 
+                    return onAuthStateChanged(auth, u => { 
+                        if (u) { setUser(u); setConnectionError(null); } 
+                    }, (e) => setConnectionError(e.message));
                 }
             }, [mode]);
 
             const handleSyncError = (e) => {
                 console.warn("Sync Error:", e);
-                if (e.code === 'permission-denied') setConnectionError("權限不足：請前往 Firebase Console > Firestore Database > Rules，將規則修改為 allow read, write: if true;");
-                else if (e.code === 'unavailable') setConnectionError("連線中斷：無法連接到 Firebase。");
+                if (e.code === 'permission-denied') setConnectionError("權限不足：請確保已正確設置 Firestore 規則。");
+                else if (e.code === 'unavailable') setConnectionError("連線中斷：無法連接到伺服器。");
             };
 
             useEffect(() => {
@@ -557,7 +565,14 @@
                             setMaps(mList.sort((a,b)=>(a.order||0)-(b.order||0))); 
                         }
                     }, handleSyncError);
-                    unL = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'logs'), orderBy('timestamp', 'desc'), limit(100)), (s) => setActionLogs(s.docs.map(d=>({id:d.id,...d.data()}))), e => console.log("Logs error:", e));
+                    
+                    // --- 關鍵修正：遵守 RULE 2，移除 orderBy 與 limit 以確保不需設定索引也能同步 ---
+                    unL = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'logs'), (s) => {
+                        const allLogs = s.docs.map(d=>({id:d.id,...d.data()}));
+                        // 改在客戶端排序與截取
+                        const sortedLogs = allLogs.sort((a,b) => getTime(b.timestamp) - getTime(a.timestamp)).slice(0, 100);
+                        setActionLogs(sortedLogs);
+                    }, e => console.log("Logs error:", e));
                 } else if (mode === 'offline') {
                     unM = LocalDB.subscribe('markers', setMarkers);
                     unS = LocalDB.subscribe('segments', d => { const m={}; d.forEach(s=>m[s.id]=s); setSegments(m); });
@@ -579,13 +594,11 @@
 
             useEffect(() => { const t = setInterval(() => setCountdown(p => (p>0?p-1:60)), 1000); return () => clearInterval(t); }, []);
 
-            // --- 核心修復：使用嚴格串行寫入以解決 Write Stream Exhausted 錯誤 ---
             const batchWrite = async (collectionName, items) => {
                 if (items.length === 0) return;
                 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
                 if (collectionName === 'segments') {
-                    // 對於包含 Base64 影像的地圖格子，使用逐一串行寫入
                     for (let i = 0; i < items.length; i++) {
                         const item = items[i];
                         const ref = doc(db, 'artifacts', appId, 'public', 'data', collectionName, item.id);
@@ -595,17 +608,16 @@
                             try {
                                 await setDoc(ref, item);
                                 success = true;
-                                await delay(800); // 檔案間延遲
+                                await delay(800);
                             } catch (e) {
                                 if (e.code === 'resource-exhausted') {
-                                    await delay(15000); // 資源耗盡時的指數退避
+                                    await delay(15000);
                                     retries--;
                                 } else throw e;
                             }
                         }
                     }
                 } else {
-                    // 一般小資料維持分段批量寫入
                     const CHUNK_SIZE = 50;
                     for (let i = 0; i < items.length; i += CHUNK_SIZE) {
                         const chunk = items.slice(i, i + CHUNK_SIZE);
@@ -798,7 +810,7 @@
                          const newMapId = `map_${Date.now()}`;
                          const newMap = { id: newMapId, name: newName, order: maps.length };
                          
-                         addNotification("地圖複製", "正在完整複製地圖資料（含影像），請耐心等候...");
+                         addNotification("地圖複製", "正在複製地圖資料...");
 
                          if (mode === 'online') {
                              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', newMapId), newMap);
@@ -806,16 +818,14 @@
                              await LocalDB.setDoc('maps', newMapId, newMap);
                          }
 
-                         // 複製標記 (Markers)
                          const markersToClone = markers.filter(m => (m.mapId === sourceMapId) || (!m.mapId && sourceMapId === 'default'));
                          const clonedMarkers = markersToClone.map((m, i) => ({
                              ...m,
-                             id: `m_clone_${Date.now()}_${i}_${Math.random().toString(36).substr(2,4)}`,
+                             id: `m_clone_${Date.now()}_${i}`,
                              mapId: newMapId,
                              createdAt: mode === 'online' ? serverTimestamp() : Date.now()
                          }));
 
-                         // 複製地圖影像塊 (Segments)
                          const segmentsToClone = Object.values(segments).filter(s => (s.mapId === sourceMapId) || (!s.mapId && sourceMapId === 'default'));
                          const clonedSegments = segmentsToClone.map(s => ({
                              ...s,
@@ -834,8 +844,8 @@
 
                          setCurrentMapId(newMapId); 
                          setMapToCopy(null);
-                         logAction('create', `複製地圖: ${newName} (源自 ${getMapName(sourceMapId)})`);
-                         addNotification(authorTitle, `地圖完整複製完成：${newName}`);
+                         logAction('create', `複製地圖: ${newName}`);
+                         addNotification(authorTitle, `地圖複製完成：${newName}`);
                     } else if (action === 'renameMap') {
                          if (mode === 'online') await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'maps', args[0]), { name: args[1] }, { merge: true }); 
                          else await LocalDB.setDoc('maps', args[0], { name: args[1] });
@@ -863,7 +873,7 @@
                             LocalDB.saveData('markerStatuses', newStatuses);
                         }
                         if (!args[0]) setStatusForm({});
-                         addNotification(authorTitle, `${oldStatus ? "更新狀態" : "新增狀態"} ${data.label}${data.isDefault ? ' (預設)' : ''}`);
+                         addNotification(authorTitle, `${oldStatus ? "更新狀態" : "新增狀態"} ${data.label}`);
                     } else if (action === 'deleteStatus') {
                          const statusToDelete = markerStatuses.find(s => s.id === args[0]);
                         if (mode === 'online') await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'markerStatuses', args[0])); else await LocalDB.deleteDoc('markerStatuses', args[0]);
@@ -871,8 +881,6 @@
                     }
                 } catch(e) {
                      console.error("Action Error", e);
-                    if (e.code === 'invalid-argument' && e.message.includes('exceeds the maximum allowed size')) addNotification("失敗", "影像檔案超過系統限制");
-                    else if (e.code === 'permission-denied') addNotification("拒絕", "您沒有執行此操作的權限");
                 }
             };
 
@@ -882,11 +890,11 @@
             const handleGroupDrop = (e, targetGroup) => { e.preventDefault(); if (!draggedGroup || draggedGroup.id === targetGroup.id) return; const copied = [...sortedGroups]; const from = copied.findIndex(g => g.id === draggedGroup.id); const to = copied.findIndex(g => g.id === targetGroup.id); copied.splice(from, 1); copied.splice(to, 0, draggedGroup); handleAction('reorderGroups', copied); };
             
             const handleExport = () => { 
-                const data = { markers, segments, markerGroups, markerStatuses, maps, version: '4.0.0', timestamp: new Date().toISOString() }; 
+                const data = { markers, segments, markerGroups, markerStatuses, maps, version: '4.0.0' }; 
                 const blob = new Blob([JSON.stringify({data})], {type:'application/json'}); 
                 const url = URL.createObjectURL(blob); 
                 const a = document.createElement('a'); 
-                a.href = url; a.download = `TacticalMap_${mode}_${new Date().toISOString().slice(0,10)}.json`; 
+                a.href = url; a.download = `TacticalMap_${new Date().toISOString().slice(0,10)}.json`; 
                 document.body.appendChild(a); a.click(); document.body.removeChild(a); 
             };
 
@@ -894,72 +902,32 @@
                  const f = e.target.files?.[0]; if(!f) return; const r = new FileReader();
                  r.onload = async (ev) => {
                      try {
-                        let json; 
-                        try { 
-                            json = JSON.parse(ev.target.result); 
-                        } catch(err) { 
-                            const parser = new DOMParser(); 
-                            const docText = parser.parseFromString(ev.target.result, 'text/html'); 
-                            const raw = docText.getElementById('raw-data'); 
-                            if(raw) json = JSON.parse(raw.textContent); else throw new Error("無效格式"); 
-                        }
-                        
+                        let json = JSON.parse(ev.target.result); 
                         const root = json.data || json; 
-                        const rawMarkers = Array.isArray(root.markers) ? root.markers : (root.markers ? Object.values(root.markers) : []); 
-                        const mM = rawMarkers.map(m => ({
-                            ...m,
-                            mapId: m.mapId || 'default',
-                            published: true, 
-                            createdAt: m.createdAt || Date.now()
-                        }));
-
-                        const gG = Array.isArray(root.markerGroups) ? root.markerGroups : (Array.isArray(root.groups) ? root.groups : []);
-                        const mP = Array.isArray(root.maps) ? root.maps : [{id:'default', name:'主地圖', order:0}];
-                        const mS = Array.isArray(root.markerStatuses) ? root.markerStatuses : (Array.isArray(root.statuses) ? root.statuses : DEFAULT_STATUSES);
                         
-                        let segArray = [];
-                        if (root.segments) {
-                            segArray = Array.isArray(root.segments) ? root.segments : Object.values(root.segments);
-                        }
+                        const rawMarkers = root.markers || [];
+                        const gG = root.markerGroups || [];
+                        const mP = root.maps || [{id:'default', name:'主地圖', order:0}];
+                        const mS = root.markerStatuses || DEFAULT_STATUSES;
+                        const segArray = root.segments ? (Array.isArray(root.segments) ? root.segments : Object.values(root.segments)) : [];
 
-                        const sanitizedGroups = gG.map(g => ({ 
-                            ...g, 
-                            parentId: (g.parentId && g.parentId !== g.id) ? g.parentId : null, 
-                            order: typeof g.order === 'number' ? g.order : 0 
-                        }));
-                        
                         if (mode === 'online') {
-                            addNotification("數據匯入", "正在以「慢速安全模式」同步數據至雲端，這可能需要幾分鐘，請勿重新整理...");
-                            setMarkers(mM);
-                            setMaps(mP);
-                            setMarkerStatuses(mS);
-                            setMarkerGroups(sanitizedGroups);
-                            setSegments(segArray.reduce((acc, s) => ({...acc, [s.id]: s}), {}));
-
+                            addNotification("數據匯入", "正在同步數據...");
                             if(mP.length > 0) await batchWrite('maps', mP);
                             if(mS.length > 0) await batchWrite('markerStatuses', mS);
-                            if(sanitizedGroups.length > 0) await batchWrite('markerGroups', sanitizedGroups);
+                            if(gG.length > 0) await batchWrite('markerGroups', gG);
                             if(segArray.length > 0) await batchWrite('segments', segArray);
-                            if(mM.length > 0) await batchWrite('markers', mM);
+                            if(rawMarkers.length > 0) await batchWrite('markers', rawMarkers);
                         } else {
-                             LocalDB.saveData('markers', mM); 
+                             LocalDB.saveData('markers', rawMarkers); 
                              LocalDB.saveData('segments', segArray); 
-                             LocalDB.saveData('markerGroups', sanitizedGroups);
+                             LocalDB.saveData('markerGroups', gG);
                              LocalDB.saveData('maps', mP);
                              LocalDB.saveData('markerStatuses', mS);
-                             setMarkers(mM);
-                             setMaps(mP);
-                             setMarkerStatuses(mS);
-                             setMarkerGroups(sanitizedGroups);
                         }
-                        setCurrentMapId('default');
-                        addNotification("系統訊息", "匯入完成！所有數據已成功與雲端對齊。");
+                        window.location.reload();
                       } catch(e) { 
-                        console.error(e);
-                        addNotification("匯入失敗", e.message);
-                      } finally { 
-                        setIsImporting(false); 
-                        if(fileInputRef.current) fileInputRef.current.value=''; 
+                        addNotification("匯入失敗", "格式錯誤");
                       }
                  }; 
                  r.readAsText(f);
@@ -1020,7 +988,7 @@
                 const x = (cx/w)*100, y = (cy/h)*100;
                 
                 if(x>=0 && x<=100 && y>=0 && y<=100) {
-                    const newId = `m_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+                    const newId = `m_${Date.now()}`;
                     const authorName = getCurrentUserName();
                     const newData = { id: newId, x, y, type: lastUsedGroupId, mapId: currentMapId, size: 16, note: "", image: "", author: authorName, createdAt: Date.now(), published: false, status: markerStatuses.find(s=>s.isDefault)?.id || null };
                     
@@ -1080,7 +1048,7 @@
 
             const renderIcon = useCallback((typeId, size) => { 
                 const s = size || 16; const g = getGroup(typeId); 
-                if(g.iconUrl) return <img src={g.iconUrl} className="object-contain" style={{width:s, height:s}} onError={e=>e.target.style.display='none'}/>; 
+                if(g.iconUrl) return <img src={g.iconUrl} className="object-contain" style={{width:s, height:s}} />; 
                 const I = {danger:Skull, loot:Shield, base:Navigation, info:MessageSquare}[typeId] || MapPin; 
                 return <I size={s} style={{color:g.color}} className="fill-current/20"/>; 
             }, [getGroup]);
@@ -1088,7 +1056,6 @@
             const toggleGroupExpansion = (id) => { const s = new Set(expandedGroupIds); if (s.has(id)) s.delete(id); else s.add(id); setExpandedGroupIds(s); };
 
             const renderGroupTreeManage = (groups, parentId = null, level = 0) => {
-                if(level > 10) return null;
                 return groups.filter(g => g.parentId === parentId || (!parentId && !g.parentId)).sort((a,b)=>(a.order||0)-(b.order||0)).map(g => (
                     <div key={g.id}>
                         <div draggable onDragStart={(e) => handleGroupDragStart(e, g)} onDragEnd={handleGroupDragEnd} onDragOver={handleGroupDragOver} onDrop={(e) => handleGroupDrop(e, g)} className={`flex items-center justify-between p-2 bg-slate-800/30 border border-slate-800 rounded hover:border-slate-700 draggable-item transition-all mb-1 ${level > 0 ? 'ml-4 border-l-2 border-l-slate-700' : ''}`}>
@@ -1097,7 +1064,10 @@
                                 <div className="w-2 h-2 rounded-full shadow-[0_0_5px_currentColor]" style={{backgroundColor:g.color}}></div>
                                 <span className="text-xs font-medium text-slate-300">{g.label}</span>
                             </div>
-                            {deletingGroupId===g.id ? (<div className="flex gap-1 animate-fadeIn"><button onClick={()=>{handleAction('deleteGroup', g.id);setDeletingGroupId(null);}} className="px-1.5 py-0.5 bg-red-600/20 text-red-400 border border-red-900 rounded text-[10px] hover:bg-red-600 hover:text-white">刪除</button><button onClick={()=>setDeletingGroupId(null)} className="px-1.5 py-0.5 bg-slate-700 text-slate-300 rounded text-[10px]">取消</button></div>) : (<div className="flex gap-1 opacity-60 hover:opacity-100"><button onClick={()=>{setGroupForm({...g});setEditingGroup(g);}} className="p-1 hover:text-white"><Edit2 size={12}/></button><button onClick={()=>setDeletingGroupId(g.id)} className="p-1 hover:text-red-400"><Trash2 size={12}/></button></div>)}
+                            <div className="flex gap-1 opacity-60 hover:opacity-100">
+                                <button onClick={()=>{setGroupForm({...g});setEditingGroup(g);}} className="p-1 hover:text-white"><Edit2 size={12}/></button>
+                                <button onClick={()=>handleAction('deleteGroup', g.id)} className="p-1 hover:text-red-400"><Trash2 size={12}/></button>
+                            </div>
                         </div>
                         {renderGroupTreeManage(groups, g.id, level + 1)}
                     </div>
@@ -1107,34 +1077,30 @@
             const renderDynamicGroupList = (groups) => {
                 return groups.sort((a,b) => (a.order || 0) - (b.order || 0)).map(group => {
                     const isExpanded = expandedGroupIds.has(group.id);
-                    // 修正：isVisible 需要使用 isGroupVisible 遞迴判斷，主分組關閉時子分組也會顯示為關閉
                     const isVisible = isGroupVisible(group.id);
                     const groupMarkers = markers.filter(m => m.type === group.id && (m.mapId === currentMapId || (!m.mapId && currentMapId === 'default')));
-                    const totalCount = groupMarkers.length;
                     const noteGroups = {}; groupMarkers.forEach(m => { const key = m.note ? m.note.trim() : '(無備註)'; if(!noteGroups[key]) noteGroups[key] = 0; noteGroups[key]++; });
                     const uniqueNotes = Object.keys(noteGroups).sort();
                     return (
                         <div key={group.id} className="mb-2">
-                            <div draggable onDragStart={(e) => handleGroupDragStart(e, group)} onDragEnd={handleGroupDragEnd} onDragOver={handleGroupDragOver} onDrop={(e) => handleGroupDrop(e, group)}
-                                className={`flex items-center justify-between p-2 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 cursor-pointer group transition-colors draggable-item ${!isVisible ? 'opacity-60' : ''}`}
-                            >
-                                <div className="flex items-center gap-2 flex-1 overflow-hidden" onClick={(e)=>{ if(uniqueNotes.length > 0){ toggleGroupExpansion(group.id); } }}>
-                                    <div className="p-1 hover:bg-slate-700 rounded text-slate-400 w-5 flex justify-center">{uniqueNotes.length > 0 && (isExpanded ? <ChevronDown size={12}/> : <ChevronRightIcon size={12}/>)}</div>
-                                    <div className="w-6 h-6 rounded bg-slate-900 flex items-center justify-center border border-slate-700 shadow-sm shrink-0" onClick={(e)=>{e.stopPropagation(); const s=new Set(hiddenGroupIds); if(s.has(group.id)) s.delete(group.id); else s.add(group.id); setHiddenGroupIds(new Set(s)); }}>{renderIcon(group.id,14)}</div>
+                            <div className={`flex items-center justify-between p-2 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 cursor-pointer group transition-colors ${!isVisible ? 'opacity-60' : ''}`}>
+                                <div className="flex items-center gap-2 flex-1 overflow-hidden" onClick={()=>{ if(uniqueNotes.length > 0) toggleGroupExpansion(group.id); }}>
+                                    <div className="p-1 text-slate-400 w-5 flex justify-center">{uniqueNotes.length > 0 && (isExpanded ? <ChevronDown size={12}/> : <ChevronRightIcon size={12}/>)}</div>
+                                    <div className="w-6 h-6 rounded bg-slate-900 flex items-center justify-center border border-slate-700">{renderIcon(group.id,14)}</div>
                                     <span className={`text-sm font-medium truncate ${!isVisible ?'text-slate-500 line-through':'text-slate-200'}`}>{group.label}</span>
-                                    <span className="text-[10px] text-slate-500 ml-auto bg-slate-900/50 px-1.5 rounded-full border border-slate-700/50">{totalCount}</span>
+                                    <span className="text-[10px] text-slate-500 ml-auto bg-slate-900/50 px-1.5 rounded-full">{groupMarkers.length}</span>
                                 </div>
-                                <div className={`text-[10px] font-bold ml-2 ${!isVisible ?'text-slate-600':'text-blue-400'}`} onClick={(e)=>{ e.stopPropagation(); const s=new Set(hiddenGroupIds); if(s.has(group.id)) s.delete(group.id); else s.add(group.id); setHiddenGroupIds(new Set(s)); }}>{!isVisible ? <EyeOff size={14} className="text-slate-600"/> : <Eye size={14} className="text-blue-400"/>}</div>
+                                <div className={`text-[10px] font-bold ml-2 ${!isVisible ?'text-slate-600':'text-blue-400'}`} onClick={(e)=>{ e.stopPropagation(); const s=new Set(hiddenGroupIds); if(s.has(group.id)) s.delete(group.id); else s.add(group.id); setHiddenGroupIds(new Set(s)); }}>{!isVisible ? <EyeOff size={14}/> : <Eye size={14}/>}</div>
                             </div>
                             {isExpanded && uniqueNotes.length > 0 && (
                                 <div className="ml-8 border-l-2 border-slate-800 space-y-1 mt-1">
                                     {uniqueNotes.map(noteText => {
                                         const noteKey = `${group.id}::${noteText === '(無備註)' ? '' : noteText}`;
-                                        const isSubVisible = !hiddenNoteKeys.has(noteKey) && isVisible; // 如果父分組不可見，備註篩選也應隱藏
+                                        const isSubVisible = !hiddenNoteKeys.has(noteKey) && isVisible;
                                         return (
                                             <div key={noteText} className={`flex items-center justify-between p-1.5 pl-3 rounded hover:bg-slate-800/50 cursor-pointer ${!isSubVisible ? 'opacity-50' : ''}`} onClick={()=>{ const k = new Set(hiddenNoteKeys); if(k.has(noteKey)) k.delete(noteKey); else k.add(noteKey); setHiddenNoteKeys(new Set(k)); }}>
-                                                <span className="text-xs text-slate-400 truncate flex-1 break-words whitespace-pre-wrap" title={noteText}>{noteText} <span className="text-slate-600 ml-1">({noteGroups[noteText]})</span></span>
-                                                <div>{!isSubVisible ? <EyeOff size={12} className="text-slate-600"/> : <Eye size={12} className="text-slate-500 hover:text-blue-400"/>}</div>
+                                                <span className="text-xs text-slate-400 truncate flex-1">{noteText} <span className="text-slate-600 ml-1">({noteGroups[noteText]})</span></span>
+                                                <div>{!isSubVisible ? <EyeOff size={12}/> : <Eye size={12}/>}</div>
                                             </div>
                                         );
                                     })}
@@ -1184,34 +1150,25 @@
                                 <div className="flex items-center space-x-2 bg-slate-800 border border-slate-700 px-3 py-1 rounded cursor-default hover:bg-slate-750 transition-colors">
                                     {mode === 'online' ? <Wifi size={14} className="text-emerald-400"/> : <WifiOff size={14} className="text-slate-400"/>}
                                     <span className={`text-xs font-bold ${mode==='online'?'text-emerald-400':'text-slate-400'}`}>{mode==='online'?'連線中':'離線模式'}</span>
-                                    {mode === 'online' && activeUsersList.length > 0 && (
-                                        <span className="ml-1 bg-emerald-900/50 text-emerald-400 text-[10px] px-1.5 rounded-full border border-emerald-900/50">{activeUsersList.length}</span>
-                                    )}
+                                    {mode === 'online' && activeUsersList.length > 0 && <span className="ml-1 bg-emerald-900/50 text-emerald-400 text-[10px] px-1.5 rounded-full">{activeUsersList.length}</span>}
                                 </div>
                                 {mode === 'online' && (
-                                    <div className="absolute top-full right-0 mt-2 w-48 bg-slate-900 border border-slate-700 rounded shadow-xl p-2 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200">
-                                        <div className="text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest border-b border-slate-800 pb-1 flex items-center justify-between">
-                                            <span>在線人員 (2m)</span>
-                                            <Users size={12} />
+                                    <div className="absolute top-full right-0 mt-2 w-48 bg-slate-900 border border-slate-700 rounded shadow-xl p-2 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+                                        <div className="text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest border-b border-slate-800 pb-1 flex items-center justify-between"><span>在線人員</span><Users size={12} /></div>
+                                        <div className="space-y-1 max-h-40 overflow-y-auto">
+                                            {activeUsersList.map((u, i) => (
+                                                <div key={i} className="flex items-center gap-2 p-1 rounded hover:bg-slate-800">
+                                                    <div className={`w-2 h-2 rounded-full ${u.isSelf ? 'bg-blue-500' : 'bg-emerald-500'}`}></div>
+                                                    <span className={`text-xs font-mono truncate ${u.isSelf ? 'text-blue-400 font-bold' : 'text-white'}`}>{u.name}</span>
+                                                </div>
+                                            ))}
                                         </div>
-                                        {activeUsersList.length === 0 ? <div className="text-xs text-slate-500 p-2 text-center">無其他人員</div> : (
-                                            <div className="space-y-1 max-h-40 overflow-y-auto">
-                                                {activeUsersList.map((u, i) => (
-                                                    <div key={i} className="flex items-center gap-2 p-1 rounded hover:bg-slate-800">
-                                                        <div className={`w-2 h-2 rounded-full ${u.isSelf ? 'bg-blue-500 shadow-[0_0_5px_#3b82f6]' : 'bg-emerald-500'}`}></div>
-                                                        <span className={`text-xs font-mono truncate ${u.isSelf ? 'text-blue-400 font-bold' : 'text-white'}`}>{u.name}</span>
-                                                        {u.isSelf && <span className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded border border-blue-900/50 font-bold ml-auto">我</span>}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                        <div className="mt-2 text-[9px] text-slate-600 text-center border-t border-slate-800 pt-1">系統每分鐘自動更新狀態</div>
                                     </div>
                                 )}
                             </div>
                             <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => setIsEditingName(true)}>
                                 <span className={`w-2 h-2 rounded-full mr-2 ${mode==='online'?'bg-green-500 animate-pulse':'bg-slate-500'}`}></span>
-                                {isEditingName ? (<input className="bg-transparent border-b border-blue-500 text-xs font-mono text-white w-20 focus:outline-none" autoFocus defaultValue={customName || (user ? user.uid.slice(0,4) : '....')} onBlur={(e) => { const val = e.target.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); }} onKeyDown={(e) => { if(e.key === 'Enter') { const val = e.currentTarget.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); } }} />) : (<span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">OP: {customName || (user ? user.uid.slice(0,4) : '....')}</span>)}
+                                {isEditingName ? (<input className="bg-transparent border-b border-blue-500 text-xs font-mono text-white w-20 focus:outline-none" autoFocus defaultValue={customName || (user ? user.uid.slice(0,4) : '....')} onBlur={(e) => { const val = e.target.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); }} onKeyDown={(e) => { if(e.key === 'Enter') e.target.blur(); }} />) : (<span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">OP: {customName || (user ? user.uid.slice(0,4) : '....')}</span>)}
                             </div>
                         </div>
                     </header>
@@ -1231,66 +1188,50 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 pl-1">圖層列表 (可拖曳)</p>
+                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 pl-1">圖層列表</p>
                                     {renderDynamicGroupList(markerGroups)}
                                 </div>}
-                                {sidebarTab==='manage' && <div className="space-y-6 animate-fadeIn">
-                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3"><div className="flex items-center gap-2 mb-3 text-slate-300 text-xs font-bold uppercase tracking-wider"><Database size={14} className="text-emerald-400"/> 數據備份</div><div className="grid grid-cols-2 gap-2"><button onClick={handleExport} className="py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><Download size={12}/> 導出</button><div className="relative"><input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" /><button className="w-full h-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><FileUp size={12}/> 導入</button></div></div></div>
+                                {sidebarTab==='manage' && <div className="space-y-6">
+                                    <div className="bg-slate-800/50 rounded border border-slate-700 p-3"><div className="flex items-center gap-2 mb-3 text-slate-300 text-xs font-bold uppercase tracking-wider"><Database size={14}/> 數據備份</div><div className="grid grid-cols-2 gap-2"><button onClick={handleExport} className="py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><Download size={12}/> 導出</button><div className="relative"><input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" /><button className="w-full h-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded border border-slate-700 text-xs flex items-center justify-center gap-1"><FileUp size={12}/> 導入</button></div></div></div>
                                     <div className="bg-slate-800/50 rounded border border-slate-700 p-3">
-                                        <div className="flex items-center justify-between mb-3"><div className="flex items-center gap-2 text-slate-300 text-xs font-bold uppercase tracking-wider"><Tag size={14} className="text-blue-400"/> 狀態標籤</div><button onClick={()=>setStatusForm({label:'', color:'#3b82f6', isDefault: false})} className="p-1 rounded bg-blue-900/30 text-blue-400 hover:bg-blue-900/50"><Plus size={12}/></button></div>
+                                        <div className="flex items-center justify-between mb-3"><div className="flex items-center gap-2 text-slate-300 text-xs font-bold uppercase tracking-wider"><Tag size={14}/> 狀態標籤</div><button onClick={()=>setStatusForm({label:'', color:'#3b82f6', isDefault: false})} className="p-1 rounded bg-blue-900/30 text-blue-400 hover:bg-blue-900/50"><Plus size={12}/></button></div>
                                         <div className="space-y-1">{markerStatuses.map(s=>(
                                             <div key={s.id} className="flex items-center justify-between p-2 bg-slate-900 rounded text-xs border border-slate-800">
                                                 <div className="flex items-center gap-3">
-                                                    <button onClick={()=>handleAction('saveStatus', {...s, isDefault: !s.isDefault})} className={`hover:scale-110 transition-transform ${s.isDefault ? 'text-yellow-400' : 'text-slate-600 hover:text-yellow-400'}`} title={s.isDefault ? "取消預設" : "設為預設"}><Star size={12} fill={s.isDefault ? "currentColor" : "none"} /></button>
-                                                    <div className="w-3 h-3 rounded-full shadow-[0_0_5px_currentColor]" style={{backgroundColor:s.color}}></div>
+                                                    <div className="w-3 h-3 rounded-full" style={{backgroundColor:s.color}}></div>
                                                     <span className="text-slate-300">{s.label}</span>
                                                 </div>
                                                 <div className="flex gap-2">
-                                                    <button onClick={()=>setStatusForm({...s})} className="text-slate-600 hover:text-white" title="編輯"><Edit2 size={12}/></button>
-                                                    <button onClick={()=>handleAction('deleteStatus', s.id)} className="text-slate-600 hover:text-red-400" title="刪除"><X size={12}/></button>
+                                                    <button onClick={()=>setStatusForm({...s})} className="text-slate-600 hover:text-white"><Edit2 size={12}/></button>
+                                                    <button onClick={()=>handleAction('deleteStatus', s.id)} className="text-slate-600 hover:text-red-400"><X size={12}/></button>
                                                 </div>
                                             </div>
                                         ))}</div>
-                                        {statusForm.label !== undefined && <div className="mt-2 p-2 border-t border-slate-700"><input type="text" placeholder="名稱" className="w-full bg-slate-950 border border-slate-700 p-1.5 text-xs mb-2 rounded text-white focus:border-blue-500 outline-none" value={statusForm.label} onChange={e=>setStatusForm({...statusForm, label:e.target.value})} /><div className="flex gap-2"><input type="color" className="flex-1 h-6 rounded cursor-pointer bg-transparent border-none" value={statusForm.color} onChange={e=>setStatusForm({...statusForm, color:e.target.value})} /><button onClick={()=>handleAction('saveStatus')} className="bg-blue-600 hover:bg-blue-500 text-white px-3 rounded text-[10px] font-bold">儲存</button></div></div>}
+                                        {statusForm.label !== undefined && <div className="mt-2 p-2 border-t border-slate-700"><input type="text" placeholder="名稱" className="w-full bg-slate-950 border border-slate-700 p-1.5 text-xs mb-2 rounded text-white" value={statusForm.label} onChange={e=>setStatusForm({...statusForm, label:e.target.value})} /><div className="flex gap-2"><input type="color" className="flex-1 h-6 rounded" value={statusForm.color} onChange={e=>setStatusForm({...statusForm, color:e.target.value})} /><button onClick={()=>handleAction('saveStatus')} className="bg-blue-600 text-white px-3 rounded text-[10px]">儲存</button></div></div>}
                                     </div>
-                                    <div><div className="flex justify-between items-center mb-2"><p className="text-[10px] text-slate-500 uppercase tracking-widest">標記分類 (可拖曳)</p><button onClick={()=>{handleAction('resetDefaults');}} className="text-blue-400 hover:text-blue-300 text-[10px] font-bold flex items-center gap-1 border border-blue-900/50 px-2 py-1 rounded bg-blue-900/20 hover:bg-blue-900/40"><RefreshCcw size={10}/> 恢復預設</button><button onClick={()=>{setGroupForm({label:'',color:'#3b82f6',iconUrl:'', parentId: ''});setEditingGroup({id:'new'});}} className="text-blue-400 hover:text-blue-300 text-[10px] font-bold flex items-center gap-1"><Plus size={10}/> 新增分類</button></div><div className="space-y-2">{renderGroupTreeManage(sortedGroups)}</div></div>
+                                    <div><div className="flex justify-between items-center mb-2"><p className="text-[10px] text-slate-500 uppercase tracking-widest">標記分類</p><button onClick={()=>{setGroupForm({label:'',color:'#3b82f6',iconUrl:'', parentId: ''});setEditingGroup({id:'new'});}} className="text-blue-400 text-[10px] font-bold flex items-center gap-1"><Plus size={10}/> 新增</button></div><div className="space-y-2">{renderGroupTreeManage(sortedGroups)}</div></div>
                                 </div>}
                                 {sidebarTab==='logs' && (
-                                    <div className="space-y-3 animate-fadeIn flex flex-col h-full">
-                                        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 pl-1">最近操作紀錄</p>
+                                    <div className="space-y-3 flex flex-col h-full">
                                         <div className="flex-1 overflow-y-auto space-y-3">
-                                            {actionLogs.length === 0 ? <div className="text-center text-slate-600 text-xs py-4">尚無紀錄</div> :
-                                                actionLogs.slice((logPage - 1) * LOGS_PER_PAGE, logPage * LOGS_PER_PAGE).map(log => (
-                                                    <div key={log.id} className={`border rounded p-2 text-xs flex justify-between items-start group ${log.type==='create'?'border-green-500/30 bg-green-500/10':log.type==='delete'?'border-red-500/30 bg-red-500/10':'border-blue-500/30 bg-blue-500/5'}`}>
-                                                        <div>
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                <span className="bg-slate-900/50 text-slate-400 px-1 rounded text-[10px] font-mono">{formatTime(log.timestamp)}</span>
-                                                                <span className={`font-bold ${log.type==='create'?'text-green-400':log.type==='delete'?'text-red-400':'text-blue-400'}`}>{log.user}</span>
-                                                            </div>
-                                                            <div className="text-slate-300">{log.desc}</div>
-                                                        </div>
-                                                        {log.undo && (<button onClick={()=>handleUndo(log)} className="text-slate-500 hover:text-white transition-colors p-1" title="還原此操作"><RotateCcw size={14}/></button>)}
+                                            {actionLogs.slice((logPage - 1) * LOGS_PER_PAGE, logPage * LOGS_PER_PAGE).map(log => (
+                                                <div key={log.id} className={`border rounded p-2 text-xs flex justify-between items-start ${log.type==='create'?'border-green-500/30 bg-green-500/10':log.type==='delete'?'border-red-500/30 bg-red-500/10':'border-blue-500/30 bg-blue-500/5'}`}>
+                                                    <div>
+                                                        <div className="flex items-center gap-2 mb-1"><span className="text-slate-400 px-1 rounded text-[10px] font-mono">{formatTime(log.timestamp)}</span><span className="font-bold">{log.user}</span></div>
+                                                        <div className="text-slate-300">{log.desc}</div>
                                                     </div>
-                                                ))
-                                            }
+                                                    {log.undo && <button onClick={()=>handleUndo(log)} className="text-slate-500 hover:text-white p-1"><RotateCcw size={14}/></button>}
+                                                </div>
+                                            ))}
                                         </div>
-                                        {actionLogs.length > LOGS_PER_PAGE && (
-                                            <div className="pt-2 mt-2 border-t border-slate-800 flex items-center justify-center gap-1 flex-wrap">
-                                                <button onClick={() => setLogPage(p => Math.max(1, p - 1))} disabled={logPage === 1} className="p-1.5 rounded bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"><ChevronLeft size={12}/></button>
-                                                {Array.from({length: Math.ceil(actionLogs.length / LOGS_PER_PAGE)}, (_, i) => i + 1).map(p => (
-                                                    <button key={p} onClick={() => setLogPage(p)} className={`w-6 h-6 flex items-center justify-center rounded text-[10px] font-bold transition-all ${logPage === p ? 'bg-blue-600 text-white shadow-lg scale-110' : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'}`}>{p}</button>
-                                                ))}
-                                                <button onClick={() => setLogPage(p => Math.min(Math.ceil(actionLogs.length / LOGS_PER_PAGE), p + 1))} disabled={logPage === Math.ceil(actionLogs.length / LOGS_PER_PAGE)} className="p-1.5 rounded bg-slate-800 text-slate-400 hover:text-white disabled:opacity-30 transition-colors"><ChevronRightIcon size={12}/></button>
-                                            </div>
-                                        )}
                                     </div>
                                 )}
                             </div>
                         </aside>
-                        {!isSidebarOpen && <div className="absolute top-4 left-4 z-30"><button onClick={()=>setIsSidebarOpen(true)} className="p-2 bg-slate-800 border border-slate-700 text-white rounded shadow-lg hover:bg-slate-700"><Menu size={20}/></button></div>}
+                        {!isSidebarOpen && <div className="absolute top-4 left-4 z-30"><button onClick={()=>setIsSidebarOpen(true)} className="p-2 bg-slate-800 border border-slate-700 text-white rounded shadow-lg"><Menu size={20}/></button></div>}
                         <main className={`flex-1 relative bg-black overflow-hidden ${interactionMode==='tactical' && isEditMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`} onMouseDown={startDrag} onMouseMove={onDrag} onMouseUp={stopDrag} onMouseLeave={stopDrag} onWheel={handleWheel} onContextMenu={e=>e.preventDefault()} onClick={handleMapContainerClick}>
                             <div className={`absolute origin-center ${isDragging ? 'will-change-transform' : 'transition-transform duration-75 ease-out'}`} style={{transform:`translate(${offset.x}px,${offset.y}px) scale(${scale})`, width:'2000px', height:'2000px', top:'calc(50% - 1000px)', left:'calc(50% - 1000px)'}}>
-                                <div ref={containerRef} className={`w-full h-full grid grid-cols-16 grid-rows-16 border-2 border-slate-800 bg-[#020617] relative shadow-2xl tactical-grid`}>
+                                <div ref={containerRef} className={`w-full h-full grid grid-cols-16 grid-rows-16 border-2 border-slate-800 bg-[#020617] relative tactical-grid`}>
                                     {gridIds.map(id => (
                                         <MapGridCell key={id} id={id} segment={currentSegments[id]} interactionMode={interactionMode} onClick={handleCellClick} />
                                     ))}
@@ -1305,82 +1246,67 @@
                                             />
                                         );
                                     })}
-                                    {selectedMarker && draftMarker && <div className="absolute pointer-events-none z-[70]" style={{left:`${(draftMarker || selectedMarker).x}%`, top:`${(draftMarker || selectedMarker).y}%`, transform:`translate(-50%,-50%) scale(${1/scale})`}}><div className="w-1.5 h-1.5 bg-white rounded-full absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 shadow-[0_0_10px_white]"/><div className="w-8 h-8 border border-emerald-500 rounded-full animate-ping opacity-50"/></div>}
+                                    {selectedMarker && draftMarker && <div className="absolute pointer-events-none z-[70]" style={{left:`${draftMarker.x}%`, top:`${draftMarker.y}%`, transform:`translate(-50%,-50%) scale(${1/scale})`}}><div className="w-1.5 h-1.5 bg-white rounded-full absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2"/><div className="w-8 h-8 border border-emerald-500 rounded-full animate-ping opacity-50"/></div>}
                                 </div>
                             </div>
-                            <div className="absolute bottom-6 right-6 flex flex-col space-y-3 z-20"><button onClick={()=>{setScale(1);setOffset({x:0,y:0});}} className="p-3 bg-slate-800/90 hover:bg-blue-600 text-white rounded-lg shadow-lg border border-slate-600 backdrop-blur transition-all group"><Maximize size={20} className="group-hover:scale-110 transition-transform"/></button><div className="bg-slate-800/90 rounded-lg shadow-lg border border-slate-600 flex flex-col backdrop-blur overflow-hidden"><button onClick={()=>handleZoom('in')} className="p-3 hover:bg-slate-700 text-white border-b border-slate-600"><Plus size={20}/></button><button onClick={()=>handleZoom('out')} className="p-3 hover:bg-slate-700 text-white"><Minus size={20}/></button></div></div>
+                            <div className="absolute bottom-6 right-6 flex flex-col space-y-3 z-20"><button onClick={()=>{setScale(1);setOffset({x:0,y:0});}} className="p-3 bg-slate-800/90 hover:bg-blue-600 text-white rounded-lg shadow-lg border border-slate-600 backdrop-blur"><Maximize size={20}/></button><div className="bg-slate-800/90 rounded-lg shadow-lg border border-slate-600 flex flex-col backdrop-blur"><button onClick={()=>handleZoom('in')} className="p-3 hover:bg-slate-700 text-white border-b border-slate-600"><Plus size={20}/></button><button onClick={()=>handleZoom('out')} className="p-3 hover:bg-slate-700 text-white"><Minus size={20}/></button></div></div>
                             <NotificationToast notifications={notifications} />
                         </main>
 
                         {selectedMarker && draftMarker && (
                             <aside className={`absolute right-0 top-0 h-full w-80 bg-slate-900/95 border-l border-slate-800 flex flex-col shadow-2xl z-[110] backdrop-blur animate-slideInRight ${panelClass}`}>
-                                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50"><h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2"><Search size={16} className="text-blue-400"/> 標記情報 {!isEditMode && <span className="text-[10px] text-amber-500 font-normal ml-2 tracking-widest">(唯讀)</span>}</h2><button onClick={handleClosePanel} className="text-slate-500 hover:text-white"><X size={18}/></button></div>
+                                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/50"><h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2"><Search size={16} className="text-blue-400"/> 標記情報 {!isEditMode && <span className="text-[10px] text-amber-500 ml-2">(唯讀)</span>}</h2><button onClick={handleClosePanel} className="text-slate-500 hover:text-white"><X size={18}/></button></div>
                                 <div className={`flex-1 overflow-y-auto p-4 space-y-5 ${!isEditMode?'pointer-events-none opacity-80':''}`}>
                                     <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">標記狀態</label><div className="flex flex-wrap gap-2">{markerStatuses.map(s=>(<button key={s.id} onClick={()=>{setDraftMarker({...draftMarker, status: s.id});}} className={`px-2 py-1 rounded-full text-[10px] font-bold transition-all border ${draftMarker.status===s.id ? 'text-white' : 'bg-slate-900 border-slate-700 text-slate-400'}`} style={draftMarker.status===s.id ? {backgroundColor:s.color, borderColor:s.color} : {}}>{s.label}</button>))}</div></div>
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">標記類型</label><div className="space-y-3">{sortedGroups.filter(g => !g.parentId).map(parent => { const children = sortedGroups.filter(g => g.parentId === parent.id); return (<div key={parent.id} className="bg-slate-800/30 rounded border border-slate-800 p-2"><div className="mb-2"><button onClick={()=>{setSelectedGroupId(parent.id);setLastUsedGroupId(parent.id);setDraftMarker({...draftMarker, type: parent.id});}} className={`w-full flex items-center gap-2 p-1.5 rounded transition-all ${draftMarker.type===parent.id ? 'bg-blue-600/20 border border-blue-500/50' : 'hover:bg-slate-700/50'}`}><div className="w-5 h-5 flex items-center justify-center bg-slate-900 rounded border border-slate-700">{renderIcon(parent.id, 14)}</div><span className="text-xs font-bold text-slate-300">{parent.label}</span></button></div>{children.length > 0 && (<div className="grid grid-cols-3 gap-2 pl-2 border-l-2 border-slate-700/50">{children.map(child => (<button key={child.id} onClick={()=>{setSelectedGroupId(child.id);setLastUsedGroupId(child.id);setDraftMarker({...draftMarker, type: child.id});}} className={`flex flex-col items-center justify-center p-1.5 rounded transition-all border ${draftMarker.type===child.id ? 'bg-blue-600 border-blue-500 text-white shadow-lg' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'}`}><div className="mb-1">{renderIcon(child.id, 16)}</div><span className="text-[10px] scale-90 truncate w-full text-center">{child.label}</span></button>))}</div>)}</div>); })}</div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">標記類型</label><div className="space-y-3">{sortedGroups.filter(g => !g.parentId).map(parent => { const children = sortedGroups.filter(g => g.parentId === parent.id); return (<div key={parent.id} className="bg-slate-800/30 rounded border border-slate-800 p-2"><div className="mb-2"><button onClick={()=>{setSelectedGroupId(parent.id);setLastUsedGroupId(parent.id);setDraftMarker({...draftMarker, type: parent.id});}} className={`w-full flex items-center gap-2 p-1.5 rounded transition-all ${draftMarker.type===parent.id ? 'bg-blue-600/20 border border-blue-500/50' : 'hover:bg-slate-700/50'}`}><div className="w-5 h-5 flex items-center justify-center bg-slate-900 rounded border border-slate-700">{renderIcon(parent.id, 14)}</div><span className="text-xs font-bold text-slate-300">{parent.label}</span></button></div>{children.length > 0 && (<div className="grid grid-cols-3 gap-2 pl-2 border-l-2 border-slate-700/50">{children.map(child => (<button key={child.id} onClick={()=>{setSelectedGroupId(child.id);setLastUsedGroupId(child.id);setDraftMarker({...draftMarker, type: child.id});}} className={`flex flex-col items-center justify-center p-1.5 rounded transition-all border ${draftMarker.type===child.id ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400'}`}><div className="mb-1">{renderIcon(child.id, 16)}</div><span className="text-[10px] truncate w-full text-center">{child.label}</span></button>))}</div>)}</div>); })}</div></div>
                                     <div><div className="flex justify-between text-[10px] text-slate-400 mb-2 font-bold uppercase tracking-widest"><span>圖示大小</span><span className="text-blue-400 font-mono">{tempSize}px</span></div><input type="range" min="16" max="64" value={tempSize} onChange={e=>{const s=Number(e.target.value);setTempSize(s);setDraftMarker({...draftMarker, size: s});}} className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/></div>
-                                    {historyNotes.length > 0 && (<div className="mb-1"><div className="relative"><select className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-xs text-slate-300 focus:border-blue-500 focus:outline-none appearance-none cursor-pointer" onChange={(e) => {if(e.target.value) {setTempNote(e.target.value);setDraftMarker({...draftMarker, note: e.target.value});}}} value=""><option value="" className="text-slate-500">▼ 快速選擇歷史備註 ({historyNotes.length})</option>{historyNotes.map((n, i) => (<option key={i} value={n} className="text-white bg-slate-900">{n}</option>))}</select><div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400"><History size={12} /></div></div></div>)}
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">戰術備註</label><textarea value={tempNote} onChange={e=>{setTempNote(e.target.value);setDraftMarker({...draftMarker, note: e.target.value});}} placeholder="輸入詳細情報..." className="w-full h-24 bg-slate-950 border border-slate-700 rounded p-3 text-sm text-white focus:border-blue-500 focus:outline-none resize-none shadow-inner" /><div className="text-[10px] text-slate-500 text-right mt-1">* 關閉面板以儲存</div></div>
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">現場影像</label><div className="relative group"><input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0]) processImage(e.target.files[0],800, (url) => {setTempMarkerImg(url);setDraftMarker({...draftMarker, image: url});})}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/><div className={`flex items-center justify-center w-full py-3 bg-slate-800 border border-dashed rounded hover:bg-slate-750 transition-colors cursor-pointer ${tempMarkerImg ? 'border-blue-500/50' : 'border-slate-700'}`}><Camera size={14} className={`mr-2 ${tempMarkerImg ? 'text-blue-400' : 'text-slate-400'}`}/> <span className={`text-xs ${tempMarkerImg ? 'text-blue-300' : 'text-slate-400'}`}>{tempMarkerImg ? '更換圖片' : '上傳照片'}</span></div></div>{tempMarkerImg && (<div className="mt-3 relative group rounded overflow-hidden border border-slate-700 cursor-zoom-in shadow-lg" onClick={() => { setLightboxImg(tempMarkerImg); setLightboxScale(1); }}><img src={tempMarkerImg} className="w-full h-48 object-cover hover:scale-105 transition-transform duration-500" /><div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity"><ZoomIn className="text-white drop-shadow-md" size={24} /></div><button onClick={(e)=>{e.stopPropagation();setTempMarkerImg("");setDraftMarker({...draftMarker, image: ""});}} className="absolute top-2 right-2 bg-red-600/90 p-1.5 rounded-full text-white hover:bg-red-500 opacity-0 group-hover:opacity-100 transition-all shadow-lg hover:scale-110"><Trash2 size={14}/></button></div>)}</div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">戰術備註</label><textarea value={tempNote} onChange={e=>{setTempNote(e.target.value);setDraftMarker({...draftMarker, note: e.target.value});}} placeholder="輸入詳細情報..." className="w-full h-24 bg-slate-950 border border-slate-700 rounded p-3 text-sm text-white focus:border-blue-500 focus:outline-none resize-none" /></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">現場影像</label><div className="relative"><input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0]) processImage(e.target.files[0],800, (url) => {setTempMarkerImg(url);setDraftMarker({...draftMarker, image: url});})}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/><div className={`flex items-center justify-center w-full py-3 bg-slate-800 border border-dashed rounded transition-colors ${tempMarkerImg ? 'border-blue-500/50' : 'border-slate-700'}`}><Camera size={14} className="mr-2"/> <span className="text-xs">{tempMarkerImg ? '更換圖片' : '上傳照片'}</span></div></div>{tempMarkerImg && (<div className="mt-3 relative group rounded overflow-hidden border border-slate-700 cursor-zoom-in" onClick={() => setLightboxImg(tempMarkerImg)}><img src={tempMarkerImg} className="w-full h-48 object-cover" /><button onClick={(e)=>{e.stopPropagation();setTempMarkerImg("");setDraftMarker({...draftMarker, image: ""});}} className="absolute top-2 right-2 bg-red-600/90 p-1 rounded-full text-white opacity-0 group-hover:opacity-100 transition-all"><Trash2 size={14}/></button></div>)}</div>
                                 </div>
-                                <div className="p-4 border-t border-slate-800 bg-slate-900 mt-auto"><div className="flex justify-between items-center">{isDeleteConfirming ? (<div className="flex gap-2 flex-1 animate-fadeIn"><button onClick={()=>{handleAction('deleteMarker',selectedMarker.id);setIsDeleteConfirming(false);}} className="flex-1 bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-2 rounded">是, 刪除</button><button onClick={()=>setIsDeleteConfirming(false)} className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold py-2 rounded">取消</button></div>) : (<button onClick={()=>setIsDeleteConfirming(true)} className="text-red-400 hover:text-white hover:bg-red-900/30 px-3 py-2 rounded transition-colors text-xs flex items-center gap-2 border border-transparent hover:border-red-900/50 w-full justify-center"><Trash2 size={14}/> 刪除標記</button>)}</div></div>
+                                <div className="p-4 border-t border-slate-800 bg-slate-900 mt-auto"><div className="flex justify-between items-center">{isDeleteConfirming ? (<div className="flex gap-2 flex-1"><button onClick={()=>{handleAction('deleteMarker',selectedMarker.id);setIsDeleteConfirming(false);}} className="flex-1 bg-red-600 text-white text-xs font-bold py-2 rounded">刪除</button><button onClick={()=>setIsDeleteConfirming(false)} className="flex-1 bg-slate-700 text-slate-200 text-xs font-bold py-2 rounded">取消</button></div>) : (<button onClick={()=>setIsDeleteConfirming(true)} className="text-red-400 hover:text-white hover:bg-red-900/30 px-3 py-2 rounded transition-colors text-xs flex items-center gap-2 w-full justify-center"><Trash2 size={14}/> 刪除標記</button>)}</div></div>
                             </aside>
                         )}
                     </div>
                     {activeCell && (
-                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[150] flex items-center justify-center p-4 animate-fadeIn">
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
                             <div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl">
-                                <h3 className="text-lg font-bold text-white mb-4 uppercase tracking-wide border-b border-slate-800 pb-4 flex items-center justify-between">
-                                    <span>編輯區域 {activeCell}</span>
-                                    <span className="text-[10px] text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">{getMapName(currentMapId)}</span>
-                                </h3>
+                                <h3 className="text-lg font-bold text-white mb-4 uppercase">編輯區域 {activeCell}</h3>
                                 <div className="mb-6">
-                                     <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase tracking-widest">區域地圖影像</label>
+                                     <label className="block text-[10px] font-bold text-slate-500 mb-2 uppercase">區域影像</label>
                                      <div className="relative group">
                                          <input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0]) processImage(e.target.files[0], 800, (url) => setTempImgUrl(url))}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/>
-                                         <div className={`flex flex-col items-center justify-center w-full h-48 bg-slate-950 border border-dashed rounded-lg hover:bg-slate-900 transition-colors cursor-pointer overflow-hidden ${tempImgUrl ? 'border-blue-500/50' : 'border-slate-700'}`}>
-                                             {tempImgUrl ? (
-                                                 <div className="relative w-full h-full group-hover:opacity-50 transition-opacity">
-                                                     <img src={tempImgUrl} className="w-full h-full object-cover" />
-                                                     <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100"><span className="bg-black/50 text-white text-xs px-2 py-1 rounded">點擊更換</span></div>
-                                                 </div>
-                                             ) : (
-                                                 <div className="flex flex-col items-center text-slate-500">
-                                                     <ImageIcon size={32} className="mb-2 opacity-50"/>
-                                                     <span className="text-xs font-bold">點擊上傳圖片</span>
-                                                     <span className="text-[10px] opacity-70 mt-1">建議比例 1:1</span>
-                                                 </div>
-                                             )}
+                                         <div className={`flex flex-col items-center justify-center w-full h-48 bg-slate-950 border border-dashed rounded-lg transition-colors overflow-hidden ${tempImgUrl ? 'border-blue-500/50' : 'border-slate-700'}`}>
+                                             {tempImgUrl ? <img src={tempImgUrl} className="w-full h-full object-cover" /> : <div className="flex flex-col items-center text-slate-500"><ImageIcon size={32} className="mb-2 opacity-50"/><span className="text-xs font-bold">點擊上傳</span></div>}
                                          </div>
-                                      </div>
+                                     </div>
                                 </div>
-                                <div className="flex justify-between items-center pt-2">
-                                    <button onClick={() => handleAction('lockSegment')} className="px-3 py-2 text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded text-xs font-bold flex items-center gap-1 border border-transparent hover:border-red-900/30"><Trash2 size={12}/> 重置/鎖定</button>
+                                <div className="flex justify-between items-center">
+                                    <button onClick={() => handleAction('lockSegment')} className="px-3 py-2 text-red-400 text-xs font-bold flex items-center gap-1"><Trash2 size={12}/> 重置</button>
                                     <div className="flex gap-2">
-                                        <button onClick={() => { setActiveCell(null); setTempImgUrl(""); }} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold transition-colors">取消</button>
-                                        <button onClick={() => handleAction('saveSegment')} disabled={!tempImgUrl} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded font-bold text-xs shadow-lg transition-all flex items-center gap-1"><Check size={12}/> 儲存顯示</button>
+                                        <button onClick={() => { setActiveCell(null); setTempImgUrl(""); }} className="px-4 py-2 text-slate-400 text-xs font-bold">取消</button>
+                                        <button onClick={() => handleAction('saveSegment')} disabled={!tempImgUrl} className="px-4 py-2 bg-blue-600 disabled:opacity-50 text-white rounded font-bold text-xs">儲存</button>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     )}
-                    {isCreateMapModalOpen && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 border-b border-slate-800 pb-4 uppercase tracking-wide">建立戰區地圖</h3><input type="text" value={newMapName} onChange={e=>setNewMapName(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none mb-6 font-bold" placeholder="地圖名稱..." autoFocus /><div className="flex justify-end gap-3"><button onClick={()=>setIsCreateMapModalOpen(false)} className="px-4 py-2 text-slate-400 text-xs font-bold uppercase">取消</button><button onClick={()=>handleAction('createMap', newMapName)} disabled={!newMapName.trim()} className="px-6 py-2 bg-blue-600 text-white rounded font-bold text-xs uppercase shadow-lg">建立</button></div></div></div>}
-                    {mapToDelete && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-red-900/50 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-4 uppercase tracking-wide border-red-900/30 pb-4 flex items-center"><AlertTriangle className="text-red-500 mr-2" size={20}/> 刪除地圖確認</h3><p className="text-slate-300 text-sm mb-6 leading-relaxed">確定要永久刪除地圖 <span className="text-white font-bold">"{mapToDelete.name}"</span> 嗎？</p><div className="flex justify-end gap-3"><button onClick={() => setMapToDelete(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={() => handleAction('deleteMap', mapToDelete.id)} className="px-6 py-2 bg-red-600 hover:bg-red-500 text-white rounded font-bold shadow-lg text-xs tracking-wide">確認刪除</button></div></div></div>}
-                    {mapToCopy && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 uppercase tracking-wide border-b border-slate-800 pb-4">複製地圖</h3><input type="text" autoFocus value={copyMapNameInput} onChange={e=>setCopyMapNameInput(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none placeholder-slate-600 font-bold mb-6" /><div className="flex justify-end gap-3"><button onClick={() => setMapToCopy(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={() => handleAction('copyMap', mapToCopy.id, copyMapNameInput)} disabled={!copyMapNameInput.trim()} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold shadow-lg text-xs tracking-wide">複製</button></div></div></div>}
+                    {isCreateMapModalOpen && <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 border-b border-slate-800 pb-4">建立戰區地圖</h3><input type="text" value={newMapName} onChange={e=>setNewMapName(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none mb-6 font-bold" placeholder="地圖名稱..." autoFocus /><div className="flex justify-end gap-3"><button onClick={()=>setIsCreateMapModalOpen(false)} className="px-4 py-2 text-slate-400 text-xs font-bold">取消</button><button onClick={()=>handleAction('createMap', newMapName)} disabled={!newMapName.trim()} className="px-6 py-2 bg-blue-600 text-white rounded font-bold text-xs uppercase shadow-lg">建立</button></div></div></div>}
+                    {mapToDelete && <div className="fixed inset-0 bg-black/80 z-[200] flex items-center justify-center p-4"><div className="bg-slate-900 border border-red-900/50 rounded-xl p-6 max-w-sm w-full"><h3 className="text-lg font-bold text-white mb-4">刪除地圖</h3><p className="text-slate-300 text-sm mb-6">確定要刪除 "{mapToDelete.name}" 嗎？</p><div className="flex justify-end gap-3"><button onClick={() => setMapToDelete(null)} className="px-4 py-2 text-slate-400 text-xs">取消</button><button onClick={() => handleAction('deleteMap', mapToDelete.id)} className="px-6 py-2 bg-red-600 text-white rounded font-bold text-xs">確認刪除</button></div></div></div>}
+                    {mapToCopy && <div className="fixed inset-0 bg-black/80 z-[200] flex items-center justify-center p-4"><div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl"><h3 className="text-lg font-bold text-white mb-6 uppercase tracking-wide border-b border-slate-800 pb-4">複製地圖</h3><input type="text" autoFocus value={copyMapNameInput} onChange={e=>setCopyMapNameInput(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white mb-6" /><div className="flex justify-end gap-3"><button onClick={() => setMapToCopy(null)} className="px-4 py-2 text-slate-400 text-xs">取消</button><button onClick={() => handleAction('copyMap', mapToCopy.id, copyMapNameInput)} className="px-6 py-2 bg-blue-600 text-white rounded font-bold text-xs">複製</button></div></div></div>}
                     {editingGroup && (
-                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-fadeIn">
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
                             <div className="bg-slate-900 border border-slate-600 rounded-xl p-6 max-w-sm w-full shadow-2xl">
                                 <h3 className="text-lg font-bold text-white mb-6 uppercase tracking-wide border-b border-slate-800 pb-4">{editingGroup.id==='new'?'新增分類':'編輯分類'}</h3>
                                 <div className="space-y-5">
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">分類名稱</label><input type="text" value={groupForm.label||''} onChange={e=>setGroupForm({...groupForm,label:e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none font-bold"/></div>
-                                    <div className="flex gap-4"><div className="flex-1"><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">代表顏色</label><div className="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded p-1"><input type="color" value={groupForm.color||'#ffffff'} onChange={e=>setGroupForm({...groupForm,color:e.target.value})} className="h-8 w-8 rounded cursor-pointer bg-transparent border-none"/><span className="text-xs font-mono text-slate-400 uppercase">{groupForm.color}</span></div></div><div className="flex-1 flex flex-col"><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">預覽</label><div className="flex-1 flex items-center justify-center border border-slate-700 bg-slate-950 rounded relative">{isProcessingImage?<RefreshCw size={20} className="animate-spin text-blue-500"/>:groupForm.iconUrl?<img src={groupForm.iconUrl} className="w-8 h-8 object-contain"/>:<MapPin size={28} style={{color:groupForm.color}} className="fill-current/20"/>}</div></div></div>
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">自訂圖示 (選填)</label><div className="relative group"><input type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0])processImage(e.target.files[0],64,(url)=>setGroupForm({...groupForm,iconUrl:url}))}} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"/><div className="flex items-center justify-center w-full py-3 bg-slate-800 border border-slate-700 border-dashed rounded hover:bg-slate-750 hover:border-blue-500 transition-colors text-xs text-slate-400 group-hover:text-blue-400"><ImageIcon size={14} className="mr-2"/> 上傳圖示 (自動縮放)</div></div>{groupForm.iconUrl&&<div className="flex justify-end mt-1"><button onClick={()=>setGroupForm({...groupForm,iconUrl:''})} className="text-[10px] text-red-400 hover:text-red-300 underline">移除圖示</button></div>}</div>
-                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">父分類 (選填)</label><div className="relative"><select value={groupForm.parentId || ''} onChange={e=>setGroupForm({...groupForm, parentId: e.target.value || null})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white focus:border-blue-500 focus:outline-none appearance-none cursor-pointer"><option value="">無 (設為頂層分類)</option>{sortedGroups.filter(g => !g.parentId && g.id !== editingGroup.id).map(g => (<option key={g.id} value={g.id}>{g.label}</option>))}</select><div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-500"><ChevronDown size={14}/></div></div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1">分類名稱</label><input type="text" value={groupForm.label||''} onChange={e=>setGroupForm({...groupForm,label:e.target.value})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white"/></div>
+                                    <div className="flex gap-4"><div className="flex-1"><label className="block text-[10px] font-bold text-slate-500 mb-1">代表顏色</label><div className="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded p-1"><input type="color" value={groupForm.color||'#ffffff'} onChange={e=>setGroupForm({...groupForm,color:e.target.value})} className="h-8 w-8 rounded cursor-pointer bg-transparent border-none"/><span className="text-xs font-mono text-slate-400 uppercase">{groupForm.color}</span></div></div><div className="flex-1 flex flex-col"><label className="block text-[10px] font-bold text-slate-500 mb-1">預覽</label><div className="flex-1 flex items-center justify-center border border-slate-700 bg-slate-950 rounded relative">{isProcessingImage?<RefreshCw className="animate-spin text-blue-500"/>:groupForm.iconUrl?<img src={groupForm.iconUrl} className="w-8 h-8 object-contain"/>:<MapPin size={28} style={{color:groupForm.color}}/>}</div></div></div>
+                                    <div><label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase">父分類 (選填)</label><select value={groupForm.parentId || ''} onChange={e=>setGroupForm({...groupForm, parentId: e.target.value || null})} className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-white"><option value="">無</option>{sortedGroups.filter(g => !g.parentId && g.id !== editingGroup.id).map(g => (<option key={g.id} value={g.id}>{g.label}</option>))}</select></div>
                                 </div>
-                                <div className="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-800"><button onClick={()=>setEditingGroup(null)} className="px-4 py-2 text-slate-400 hover:text-white text-xs font-bold">取消</button><button onClick={()=>handleAction('saveGroup')} disabled={!groupForm.label||isProcessingImage} className="px-6 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded font-bold shadow-lg text-xs tracking-wide">儲存設定</button></div>
+                                <div className="flex justify-end gap-3 mt-8 pt-4 border-t border-slate-800"><button onClick={()=>setEditingGroup(null)} className="px-4 py-2 text-slate-400 text-xs">取消</button><button onClick={()=>handleAction('saveGroup')} className="px-6 py-2 bg-blue-600 text-white rounded font-bold text-xs">儲存</button></div>
                             </div>
                         </div>
                     )}
+                    {lightboxImg && <div className="fixed inset-0 bg-black/90 z-[300] flex items-center justify-center p-4 onClick={() => setLightboxImg(null)} animate-fadeIn"><img src={lightboxImg} className="max-w-full max-h-full object-contain shadow-2xl" onClick={e=>e.stopPropagation()} /><button onClick={()=>setLightboxImg(null)} className="absolute top-6 right-6 text-white hover:text-red-400"><X size={32}/></button></div>}
                 </ErrorBoundary>
             );
         }
