@@ -82,7 +82,6 @@
         let app, auth, db; 
         let isConfigured = false;
 
-        // 優先讀取環境提供的 Config
         if (typeof window.__firebase_config !== 'undefined') { 
             try { 
                 firebaseConfig = JSON.parse(window.__firebase_config); 
@@ -91,7 +90,6 @@
             } catch (e) {} 
         }
 
-        // --- 100% 還原您原本的金鑰設定 ---
         const manualConfig = { 
             apiKey: "AIzaSyBE_zihRCqVCXks-v_rRKmVYlx7hKkVY9I",
             authDomain: "icarus-3a27d.firebaseapp.com",
@@ -287,6 +285,7 @@
             const [connectionError, setConnectionError] = useState(null);
             
             const [customName, setCustomName] = useState(() => localStorage.getItem('ops_username') || '');
+            const [nameInput, setNameInput] = useState(''); // 新增：用於穩定輸入框的狀態
             const [isEditingName, setIsEditingName] = useState(false);
             
             const [soundEnabled, setSoundEnabled] = useState(true);
@@ -566,10 +565,8 @@
                         }
                     }, handleSyncError);
                     
-                    // --- 關鍵修正：遵守 RULE 2，移除 orderBy 與 limit 以確保不需設定索引也能同步 ---
                     unL = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'logs'), (s) => {
                         const allLogs = s.docs.map(d=>({id:d.id,...d.data()}));
-                        // 改在客戶端排序與截取
                         const sortedLogs = allLogs.sort((a,b) => getTime(b.timestamp) - getTime(a.timestamp)).slice(0, 100);
                         setActionLogs(sortedLogs);
                     }, e => console.log("Logs error:", e));
@@ -1166,9 +1163,30 @@
                                     </div>
                                 )}
                             </div>
-                            <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => setIsEditingName(true)}>
+                            {/* 右上角 ID 輸入邏輯優化 */}
+                            <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => { setIsEditingName(true); setNameInput(customName || (user ? user.uid.slice(0,4) : '')); }}>
                                 <span className={`w-2 h-2 rounded-full mr-2 ${mode==='online'?'bg-green-500 animate-pulse':'bg-slate-500'}`}></span>
-                                {isEditingName ? (<input className="bg-transparent border-b border-blue-500 text-xs font-mono text-white w-20 focus:outline-none" autoFocus defaultValue={customName || (user ? user.uid.slice(0,4) : '....')} onBlur={(e) => { const val = e.target.value.trim(); if(val) { setCustomName(val); localStorage.setItem('ops_username', val); } setIsEditingName(false); }} onKeyDown={(e) => { if(e.key === 'Enter') e.target.blur(); }} />) : (<span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">OP: {customName || (user ? user.uid.slice(0,4) : '....')}</span>)}
+                                {isEditingName ? (
+                                    <input 
+                                        className="bg-transparent border-b border-blue-500 text-xs font-mono text-white w-20 focus:outline-none" 
+                                        autoFocus 
+                                        value={nameInput} 
+                                        onChange={(e) => setNameInput(e.target.value)}
+                                        onBlur={() => { 
+                                            const val = nameInput.trim(); 
+                                            if(val) { 
+                                                setCustomName(val); 
+                                                localStorage.setItem('ops_username', val); 
+                                            } 
+                                            setIsEditingName(false); 
+                                        }} 
+                                        onKeyDown={(e) => { if(e.key === 'Enter') e.target.blur(); }} 
+                                    />
+                                ) : (
+                                    <span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">
+                                        OP: {customName || (user ? user.uid.slice(0,4) : '....')}
+                                    </span>
+                                )}
                             </div>
                         </div>
                     </header>
