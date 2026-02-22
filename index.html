@@ -284,9 +284,25 @@
             const [user, setUser] = useState(null);
             const [connectionError, setConnectionError] = useState(null);
             
+            // --- 右上角 ID 儲存邏輯強化 ---
             const [customName, setCustomName] = useState(() => localStorage.getItem('ops_username') || '');
-            const [nameInput, setNameInput] = useState(''); // 新增：用於穩定輸入框的狀態
+            const [nameInput, setNameInput] = useState(''); 
             const [isEditingName, setIsEditingName] = useState(false);
+
+            // 當 customName 改變時，同步寫入 localStorage
+            useEffect(() => {
+                if (customName) {
+                    localStorage.setItem('ops_username', customName);
+                }
+            }, [customName]);
+
+            const saveName = (val) => {
+                const trimmed = val.trim();
+                if (trimmed) {
+                    setCustomName(trimmed);
+                }
+                setIsEditingName(false);
+            };
             
             const [soundEnabled, setSoundEnabled] = useState(true);
             const [viewQuality, setViewQuality] = useState('original');
@@ -1163,7 +1179,7 @@
                                     </div>
                                 )}
                             </div>
-                            {/* 右上角 ID 輸入邏輯優化 */}
+                            {/* 右上角 ID 儲存區域 */}
                             <div className="flex items-center bg-slate-800 px-3 py-1.5 border border-slate-700 rounded cursor-pointer hover:border-blue-500 transition-colors group relative" onClick={() => { setIsEditingName(true); setNameInput(customName || (user ? user.uid.slice(0,4) : '')); }}>
                                 <span className={`w-2 h-2 rounded-full mr-2 ${mode==='online'?'bg-green-500 animate-pulse':'bg-slate-500'}`}></span>
                                 {isEditingName ? (
@@ -1172,15 +1188,8 @@
                                         autoFocus 
                                         value={nameInput} 
                                         onChange={(e) => setNameInput(e.target.value)}
-                                        onBlur={() => { 
-                                            const val = nameInput.trim(); 
-                                            if(val) { 
-                                                setCustomName(val); 
-                                                localStorage.setItem('ops_username', val); 
-                                            } 
-                                            setIsEditingName(false); 
-                                        }} 
-                                        onKeyDown={(e) => { if(e.key === 'Enter') e.target.blur(); }} 
+                                        onBlur={(e) => saveName(e.target.value)} 
+                                        onKeyDown={(e) => { if(e.key === 'Enter') saveName(e.target.value); }} 
                                     />
                                 ) : (
                                     <span className="text-xs font-mono text-slate-300 uppercase group-hover:text-blue-300">
