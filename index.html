@@ -73,7 +73,8 @@
         import { createRoot } from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-        import { getFirestore, collection, doc, setDoc, onSnapshot, query, deleteDoc, serverTimestamp, getDocs, writeBatch, orderBy, limit } from 'firebase/firestore';
+        // 核心修改：引入 initializeFirestore, persistentLocalCache 進行快取優化
+        import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, setDoc, onSnapshot, query, deleteDoc, serverTimestamp, writeBatch } from 'firebase/firestore';
         import { Map as MapIcon, Plus, Minus, Maximize, Shield, Skull, MessageSquare, Navigation, Upload, RefreshCw, Eye, EyeOff, Settings, Filter, Trash2, Edit2, ChevronLeft, MapPin, Menu, Crosshair, Grid, Image as ImageIcon, X, Download, FileUp, Database, AlertTriangle, ExternalLink, Radio, Layers, Search, Wifi, WifiOff, Loader2, Check, Camera, ZoomIn, Target, History, GripVertical, ChevronDown, ChevronRight as ChevronRightIcon, RefreshCcw, RotateCcw, Bell, Volume2, VolumeX, User, Music, Monitor, Zap, Tag, Copy, Lock, Unlock, Users, Star } from 'lucide-react';
 
         // --- Config ---
@@ -108,7 +109,15 @@
             try { 
                 app = initializeApp(firebaseConfig); 
                 auth = getAuth(app); 
-                db = getFirestore(app); 
+                // 核心優化：開啟 Firestore 本地持久化快取，解決龐大 Base64 下載卡死的問題
+                try {
+                    db = initializeFirestore(app, {
+                        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+                    });
+                } catch (e) {
+                    // 如果熱重載導致重複初始化，退回預設的 getFirestore
+                    db = getFirestore(app);
+                }
             } catch(e) { 
                 console.error("Firebase init failed", e); 
                 isConfigured = false; 
@@ -375,7 +384,7 @@
             const [lightboxScale, setLightboxScale] = useState(1);
             const fileInputRef = useRef(null);
             const containerRef = useRef(null);
-            const mainRef = useRef(null); // 加入新的 ref 用於解決滾輪報錯
+            const mainRef = useRef(null);
 
             const panelClass = 'glass-panel';
             const markerClass = 'filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]';
@@ -569,6 +578,7 @@
                 if (mode === 'unconfigured') return;
                 let unM, unS, unG, unL, unSt, unMp;
                 if (mode === 'online' && user && db) {
+                    // Firebase 現在會優先從本地 Cache 秒讀取這幾十 MB 的資料，再透過網路補足差異
                     unM = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'markers')), (s) => setMarkers(s.docs.map(d=>({id:d.id,...d.data()}))), handleSyncError);
                     unS = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'segments')), (s) => { const d={}; s.forEach(doc=>d[doc.id]=doc.data()); setSegments(d); }, handleSyncError);
                     unG = onSnapshot(query(collection(db, 'artifacts', appId, 'public', 'data', 'markerGroups')), (s) => {
