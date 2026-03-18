@@ -375,6 +375,7 @@
             const [lightboxScale, setLightboxScale] = useState(1);
             const fileInputRef = useRef(null);
             const containerRef = useRef(null);
+            const mainRef = useRef(null); // 加入新的 ref 用於解決滾輪報錯
 
             const panelClass = 'glass-panel';
             const markerClass = 'filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]';
@@ -617,7 +618,6 @@
                 const delay = (ms) => new Promise(res => setTimeout(res, ms));
                 const CHUNK_SIZE = 50;
 
-                // 修正地圖塊與其他集合的一致性分批寫入邏輯
                 for (let i = 0; i < items.length; i += CHUNK_SIZE) {
                     const chunk = items.slice(i, i + CHUNK_SIZE);
                     const batch = writeBatch(db);
@@ -632,7 +632,6 @@
                         try {
                             await batch.commit();
                             success = true;
-                            // 導入期間不需要過長的延遲，僅確保伺服器處理隊列不阻塞
                             await delay(200); 
                         } catch (e) {
                             if (e.code === 'resource-exhausted') {
@@ -901,37 +900,35 @@
                  const f = e.target.files?.[0]; if(!f) return; const r = new FileReader();
                  r.onload = async (ev) => {
                      try {
-                        setIsImporting(true); 
-                        addNotification("備份同步中", "正在寫入雲端數據，請勿關閉視窗...");
+                         setIsImporting(true); 
+                         addNotification("備份同步中", "正在寫入雲端數據，請勿關閉視窗...");
                         
-                        let json = JSON.parse(ev.target.result); 
-                        const root = json.data || json; 
+                         let json = JSON.parse(ev.target.result); 
+                         const root = json.data || json; 
                         
-                        const rawMarkers = root.markers || [];
-                        const gG = root.markerGroups || [];
-                        const mP = root.maps || [{id:'default', name:'主地圖', order:0}];
-                        const mS = root.markerStatuses || DEFAULT_STATUSES;
-                        const segArray = root.segments ? (Array.isArray(root.segments) ? root.segments : Object.values(root.segments)) : [];
+                         const rawMarkers = root.markers || [];
+                         const gG = root.markerGroups || [];
+                         const mP = root.maps || [{id:'default', name:'主地圖', order:0}];
+                         const mS = root.markerStatuses || DEFAULT_STATUSES;
+                         const segArray = root.segments ? (Array.isArray(root.segments) ? root.segments : Object.values(root.segments)) : [];
 
-                        if (mode === 'online') {
-                            // 關鍵修復：依序且完整Await所有寫入隊列
-                            await batchWrite('maps', mP);
-                            await batchWrite('markerStatuses', mS);
-                            await batchWrite('markerGroups', gG);
-                            await batchWrite('segments', segArray);
-                            await batchWrite('markers', rawMarkers);
+                         if (mode === 'online') {
+                             await batchWrite('maps', mP);
+                             await batchWrite('markerStatuses', mS);
+                             await batchWrite('markerGroups', gG);
+                             await batchWrite('segments', segArray);
+                             await batchWrite('markers', rawMarkers);
                             
-                            addNotification("同步完成", "所有資料已安全儲存，系統即將重新載入...");
-                            // 多給 2 秒緩衝，確保 Firestore 快取完全 Flush 且頁面重載不會切斷異步連線
-                            setTimeout(() => window.location.reload(), 2000);
-                        } else {
-                             LocalDB.saveData('markers', rawMarkers); 
-                             LocalDB.saveData('segments', segArray); 
-                             LocalDB.saveData('markerGroups', gG);
-                             LocalDB.saveData('maps', mP);
-                             LocalDB.saveData('markerStatuses', mS);
-                             window.location.reload();
-                        }
+                             addNotification("同步完成", "所有資料已安全儲存，系統即將重新載入...");
+                             setTimeout(() => window.location.reload(), 2000);
+                         } else {
+                              LocalDB.saveData('markers', rawMarkers); 
+                              LocalDB.saveData('segments', segArray); 
+                              LocalDB.saveData('markerGroups', gG);
+                              LocalDB.saveData('maps', mP);
+                              LocalDB.saveData('markerStatuses', mS);
+                              window.location.reload();
+                         }
                       } catch(e) { 
                         console.error("Import Error:", e);
                         addNotification("導入異常", "檔案格式不正確或連線受阻");
@@ -941,14 +938,24 @@
                  r.readAsText(f);
              };
 
-            const handleWheel = (e) => { 
-                e.preventDefault(); 
-                const nextScale = Math.min(Math.max(0.43, scale * Math.exp(-e.deltaY * 0.001)), 8); 
-                const rect = e.currentTarget.getBoundingClientRect(); 
-                const ratio = nextScale / scale; 
-                setScale(nextScale); 
-                setOffset({ x: (e.clientX - rect.left - rect.width / 2) - ((e.clientX - rect.left - rect.width / 2) - offset.x) * ratio, y: (e.clientY - rect.top - rect.height / 2) - ((e.clientY - rect.top - rect.height / 2) - offset.y) * ratio }); 
-            };
+            // 使用原生監聽器解決 preventDefault 報錯
+            useEffect(() => {
+                const mainEl = mainRef.current;
+                if (!mainEl) return;
+                const handleNativeWheel = (e) => {
+                    e.preventDefault(); 
+                    const nextScale = Math.min(Math.max(0.43, scale * Math.exp(-e.deltaY * 0.001)), 8);
+                    const rect = mainEl.getBoundingClientRect();
+                    const ratio = nextScale / scale;
+                    setScale(nextScale);
+                    setOffset({ 
+                        x: (e.clientX - rect.left - rect.width / 2) - ((e.clientX - rect.left - rect.width / 2) - offset.x) * ratio, 
+                        y: (e.clientY - rect.top - rect.height / 2) - ((e.clientY - rect.top - rect.height / 2) - offset.y) * ratio 
+                    });
+                };
+                mainEl.addEventListener('wheel', handleNativeWheel, { passive: false });
+                return () => mainEl.removeEventListener('wheel', handleNativeWheel);
+            }, [scale, offset]);
             
             const handleZoom = (dir) => { 
                 const next = dir==='in' ? Math.min(8, scale*1.35) : Math.max(0.43, scale/1.35); 
@@ -1260,7 +1267,9 @@
                             </div>
                         </aside>
                         {!isSidebarOpen && <div className="absolute top-4 left-4 z-30"><button onClick={()=>setIsSidebarOpen(true)} className="p-2 bg-slate-800 border border-slate-700 text-white rounded shadow-lg"><Menu size={20}/></button></div>}
-                        <main className={`flex-1 relative bg-black overflow-hidden ${interactionMode==='tactical' && isEditMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`} onMouseDown={startDrag} onMouseMove={onDrag} onMouseUp={stopDrag} onMouseLeave={stopDrag} onWheel={handleWheel} onContextMenu={e=>e.preventDefault()} onClick={handleMapContainerClick}>
+                        
+                        {/* 修改處：加入了 ref={mainRef}，並移除了原本的 onWheel 事件綁定 */}
+                        <main ref={mainRef} className={`flex-1 relative bg-black overflow-hidden ${interactionMode==='tactical' && isEditMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`} onMouseDown={startDrag} onMouseMove={onDrag} onMouseUp={stopDrag} onMouseLeave={stopDrag} onContextMenu={e=>e.preventDefault()} onClick={handleMapContainerClick}>
                             <div className={`absolute origin-center ${isDragging ? 'will-change-transform' : 'transition-transform duration-75 ease-out'}`} style={{transform:`translate(${offset.x}px,${offset.y}px) scale(${scale})`, width:'2000px', height:'2000px', top:'calc(50% - 1000px)', left:'calc(50% - 1000px)'}}>
                                 <div ref={containerRef} className={`w-full h-full grid grid-cols-16 grid-rows-16 border-2 border-slate-800 bg-[#020617] relative tactical-grid`}>
                                     {gridIds.map(id => (
